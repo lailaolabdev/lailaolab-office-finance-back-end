@@ -1,0 +1,425 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================
+// USERS & AUTH
+// ============================================================
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  ACCOUNTANT_LEAD
+  FINANCE_STAFF
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  password     String
+  fullName     String
+  phone        String?
+  avatarUrl    String?
+  role         UserRole  @default(FINANCE_STAFF)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  transactions     Transaction[]
+  approvedTxns     Transaction[]   @relation("ApprovedBy")
+  uploadedFiles    StatementFile[]
+  activityLogs     ActivityLog[]
+  notifications    Notification[]
+
+  @@map("users")
+}
+
+model ActivityLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String
+  entityType String?
+  entityId   String?
+  oldValue   Json?
+  newValue   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@map("activity_logs")
+}
+
+// ============================================================
+// COMPANIES & BANK ACCOUNTS
+// ============================================================
+
+model Company {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  nameEn      String?
+  taxId       String?
+  address     String?
+  phone       String?
+  email       String?
+  logoUrl     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  bankAccounts BankAccount[]
+  transactions Transaction[]
+
+  @@map("companies")
+}
+
+model Bank {
+  id        String   @id @default(cuid())
+  code      String   @unique // BCEL, JDB, LDB, IB, ACELIDA
+  name      String
+  nameEn    String?
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bankAccounts BankAccount[]
+
+  @@map("banks")
+}
+
+enum AccountType {
+  USABLE          // ບັນຊີໃຊ້ໄດ້
+  STUCK           // ບັນຊີຕິດ
+  COLLATERAL      // ບັນຊີຄ້ຳປະກັນ
+  FUND            // ບັນຊີກອງທຶນ
+}
+
+enum Currency {
+  LAK
+  THB
+  USD
+  CNY
+  VND
+}
+
+model BankAccount {
+  id             String      @id @default(cuid())
+  companyId      String
+  bankId         String
+  accountNumber  String
+  accountName    String
+  accountType    AccountType @default(USABLE)
+  currency       Currency    @default(LAK)
+  openingBalance Decimal     @default(0) @db.Decimal(20, 2)
+  currentBalance Decimal     @default(0) @db.Decimal(20, 2)
+  isActive       Boolean     @default(true)
+  note           String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  company         Company         @relation(fields: [companyId], references: [id])
+  bank            Bank            @relation(fields: [bankId], references: [id])
+  transactions    Transaction[]
+  statementFiles  StatementFile[]
+
+  @@unique([companyId, bankId, accountNumber])
+  @@map("bank_accounts")
+}
+
+// ============================================================
+// CATEGORIES
+// ============================================================
+
+model Category {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  nameEn      String?
+  icon        String?
+  color       String?
+  isActive    Boolean      @default(true)
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  subCategories SubCategory[]
+  transactions  Transaction[]
+
+  @@map("categories")
+}
+
+model SubCategory {
+  id         String   @id @default(cuid())
+  categoryId String
+  code       String   @unique
+  name       String
+  nameEn     String?
+  icon       String?
+  color      String?
+  isActive   Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  category     Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([categoryId])
+  @@map("sub_categories")
+}
+
+// ============================================================
+// VENDORS & CUSTOMERS
+// ============================================================
+
+enum PartyType {
+  VENDOR
+  CUSTOMER
+  BOTH
+}
+
+model Party {
+  id        String    @id @default(cuid())
+  code      String    @unique
+  name      String
+  type      PartyType @default(VENDOR)
+  taxId     String?
+  phone     String?
+  email     String?
+  address   String?
+  note      String?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  transactions Transaction[]
+
+  @@map("parties")
+}
+
+// ============================================================
+// TRANSACTIONS
+// ============================================================
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+}
+
+enum TransactionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  POSTED
+  VOIDED
+}
+
+model Transaction {
+  id              String            @id @default(cuid())
+  reference       String            @unique // Auto-generated
+  companyId       String
+  bankAccountId   String
+  type            TransactionType
+  status          TransactionStatus @default(POSTED)
+  transactionDate DateTime
+  amount          Decimal           @db.Decimal(20, 2)
+  currency        Currency          @default(LAK)
+  exchangeRate    Decimal           @default(1) @db.Decimal(20, 6)
+  exchangeRateId  String?
+  amountInBase    Decimal           @db.Decimal(20, 2) // amount * exchangeRate
+  categoryId      String?
+  subCategoryId   String?
+  partyId         String?
+  description     String
+  note            String?
+
+  // Duplicate detection fields
+  bankReference   String?
+  externalRef     String?
+
+  // Transfer specific
+  transferToAccountId String?
+
+  // Audit
+  createdById   String
+  approvedById  String?
+  approvedAt    DateTime?
+  postedAt      DateTime?
+  voidedAt      DateTime?
+  voidReason    String?
+
+  // Source
+  source        String?         // MANUAL, STATEMENT_IMPORT, API
+  statementFileId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company        Company        @relation(fields: [companyId], references: [id])
+  bankAccount    BankAccount    @relation(fields: [bankAccountId], references: [id])
+  exchangeRateRef ExchangeRate? @relation(fields: [exchangeRateId], references: [id])
+  category       Category?      @relation(fields: [categoryId], references: [id])
+  subCategory    SubCategory?   @relation(fields: [subCategoryId], references: [id])
+  party          Party?         @relation(fields: [partyId], references: [id])
+  createdBy      User           @relation(fields: [createdById], references: [id])
+  approvedBy     User?          @relation("ApprovedBy", fields: [approvedById], references: [id])
+  statementFile  StatementFile? @relation(fields: [statementFileId], references: [id])
+  attachments    Attachment[]
+  tags           TagOnTransaction[]
+
+  @@unique([bankAccountId, bankReference, transactionDate, amount], name: "uniq_bank_txn", map: "uniq_bank_txn")
+  @@index([companyId, transactionDate])
+  @@index([bankAccountId, transactionDate])
+  @@index([categoryId])
+  @@index([subCategoryId])
+  @@index([status])
+  @@index([bankReference])
+  @@map("transactions")
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String?
+  createdAt DateTime @default(now())
+
+  transactions TagOnTransaction[]
+
+  @@map("tags")
+}
+
+model TagOnTransaction {
+  transactionId String
+  tagId         String
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  tag         Tag         @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([transactionId, tagId])
+  @@map("tag_on_transactions")
+}
+
+// ============================================================
+// STATEMENT FILES & ATTACHMENTS
+// ============================================================
+
+enum StatementStatus {
+  UPLOADED
+  PARSING
+  PARSED
+  PROCESSED
+  FAILED
+}
+
+model StatementFile {
+  id              String          @id @default(cuid())
+  bankAccountId   String
+  fileName        String
+  filePath        String
+  fileSize        Int
+  mimeType        String
+  fileHash        String          // SHA256 of file bytes — file-level idempotency
+  bankTemplate    String?         // BCEL, JDB, LDB, IB, ACELIDA, GENERIC
+  status          StatementStatus @default(UPLOADED)
+  periodStart     DateTime?
+  periodEnd       DateTime?
+  totalRecords    Int             @default(0)
+  importedRecords Int             @default(0)
+  duplicateCount  Int             @default(0)
+  errorMessage    String?
+  uploadedById    String
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  bankAccount  BankAccount   @relation(fields: [bankAccountId], references: [id])
+  uploadedBy   User          @relation(fields: [uploadedById], references: [id])
+  transactions Transaction[]
+
+  @@unique([bankAccountId, fileHash])
+  @@index([fileHash])
+  @@map("statement_files")
+}
+
+model Attachment {
+  id            String   @id @default(cuid())
+  transactionId String
+  fileName      String
+  filePath      String
+  fileSize      Int
+  mimeType      String
+  createdAt     DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@map("attachments")
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+enum NotificationType {
+  INFO
+  WARNING
+  ERROR
+  APPROVAL_REQUEST
+  LOW_BALANCE
+  DAILY_REMINDER
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType @default(INFO)
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  category  String?
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model ExchangeRate {
+  id           String        @id @default(cuid())
+  fromCurrency Currency
+  toCurrency   Currency
+  rate         Decimal       @db.Decimal(20, 6)
+  effectiveAt  DateTime
+  createdAt    DateTime      @default(now())
+
+  transactions Transaction[]
+
+  @@unique([fromCurrency, toCurrency, effectiveAt])
+  @@map("exchange_rates")
+}

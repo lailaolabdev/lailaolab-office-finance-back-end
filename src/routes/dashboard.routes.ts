@@ -1,0 +1,1311 @@
+import { Router } from 'express';
+import { Prisma, TransactionStatus, TransactionType } from '@prisma/client';
+import { prisma } from '../config/prisma';
+import { authenticate } from '../middleware/auth';
+import { asyncHandler } from '../utils/asyncHandler';
+
+const router = Router();
+router.use(authenticate);
+
+type DateRangeQuery = {
+  from?: string;
+  to?: string;
+  companyId?: string;
+};
+
+function parseDateRange(query: DateRangeQuery) {
+  const now = new Date();
+  const defaultFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+  const defaultTo = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+  const from = query.from ? new Date(query.from) : defaultFrom;
+  const to = query.to ? new Date(query.to) : defaultTo;
+
+  // Normalize to inclusive day boundaries
+  from.setHours(0, 0, 0, 0);
+  to.setHours(23, 59, 59, 999);
+
+  return { from, to };
+}
+
+function buildBaseWhere(query: DateRangeQuery): Prisma.TransactionWhereInput {
+  const { from, to } = parseDateRange(query);
+  const where: Prisma.TransactionWhereInput = {
+    transactionDate: { gte: from, lte: to },
+    status: { notIn: [TransactionStatus.VOIDED, TransactionStatus.REJECTED, TransactionStatus.DRAFT] },
+  };
+  if (query.companyId) {
+    where.companyId = query.companyId;
+  }
+  return where;
+}
+
+router.get(
+  '/summary',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const baseWhere = buildBaseWhere(query);
+
+    const [companies, accounts, txnsToday, totalBalance, incomeAgg, expenseAgg, txnCount] =
+      await Promise.all([
+        prisma.company.count({ where: { isActive: true } }),
+        prisma.bankAccount.count({ where: { isActive: true } }),
+        prisma.transaction.count({
+          where: {
+            transactionDate: {
+              gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            },
+          },
+        }),
+        prisma.bankAccount.aggregate({
+          where: { isActive: true, accountType: 'USABLE' },
+          _sum: { currentBalance: true },
+        }),
+        prisma.transaction.aggregate({
+          where: { ...baseWhere, type: TransactionType.INCOME },
+          _sum: { amountInBase: true },
+          _count: true,
+        }),
+        prisma.transaction.aggregate({
+          where: { ...baseWhere, type: TransactionType.EXPENSE },
+          _sum: { amountInBase: true },
+          _count: true,
+        }),
+        prisma.transaction.count({ where: baseWhere }),
+      ]);
+
+    const totalIncome = Number(incomeAgg._sum.amountInBase ?? 0);
+    const totalExpense = Number(expenseAgg._sum.amountInBase ?? 0);
+
+    res.json({
+      success: true,
+      data: {
+        companies,
+        accounts,
+        txnsToday,
+        usableBalance: totalBalance._sum.currentBalance ?? 0,
+        totalIncome,
+        totalExpense,
+        netCashflow: totalIncome - totalExpense,
+        incomeCount: incomeAgg._count,
+        expenseCount: expenseAgg._count,
+        txnCount,
+      },
+    });
+  }),
+);
+
+router.get(
+  '/cash-position',
+  asyncHandler(async (_req, res) => {
+    const result = await prisma.bankAccount.groupBy({
+      by: ['accountType', 'currency'],
+      where: { isActive: true },
+      _sum: { currentBalance: true },
+      _count: true,
+    });
+    res.json({ success: true, data: result });
+  }),
+);
+
+router.get(
+  '/category-breakdown',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery & { type?: TransactionType };
+    const baseWhere = buildBaseWhere(query);
+    const type = query.type === TransactionType.EXPENSE ? TransactionType.EXPENSE : TransactionType.INCOME;
+
+    const grouped = await prisma.transaction.groupBy({
+      by: ['categoryId'],
+      where: { ...baseWhere, type },
+      _sum: { amountInBase: true },
+      _count: true,
+    });
+
+    const categoryIds = grouped.map((g) => g.categoryId).filter((id): id is string => Boolean(id));
+    const categories = categoryIds.length
+      ? await prisma.category.findMany({
+        where: { id: { in: categoryIds } },
+        select: { id: true, code: true, name: true, nameEn: true, color: true, icon: true },
+      })
+      : [];
+    const catMap = new Map(categories.map((c) => [c.id, c]));
+
+    const total = grouped.reduce((acc, g) => acc + Number(g._sum.amountInBase ?? 0), 0);
+
+    const data = grouped
+      .map((g) => {
+        const cat = g.categoryId ? catMap.get(g.categoryId) : undefined;
+        const amount = Number(g._sum.amountInBase ?? 0);
+        return {
+          categoryId: g.categoryId,
+          code: cat?.code ?? null,
+          name: cat?.name ?? 'ບໍ່ໄດ້ກຳນົດໝວດ',
+          nameEn: cat?.nameEn ?? null,
+          color: cat?.color ?? null,
+          icon: cat?.icon ?? null,
+          amount,
+          count: g._count,
+          percentage: total > 0 ? (amount / total) * 100 : 0,
+        };
+      })
+      .sort((a, b) => b.amount - a.amount);
+
+    res.json({ success: true, data: { type, total, items: data } });
+  }),
+);
+
+router.get(
+  '/monthly-trend',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery & { months?: string };
+    const months = Math.min(Math.max(parseInt(query.months ?? '6', 10) || 6, 1), 24);
+
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const where: Prisma.TransactionWhereInput = {
+      transactionDate: { gte: start, lte: end },
+      status: { notIn: [TransactionStatus.VOIDED, TransactionStatus.REJECTED, TransactionStatus.DRAFT] },
+    };
+    if (query.companyId) where.companyId = query.companyId;
+
+    const rows = await prisma.transaction.findMany({
+      where,
+      select: { transactionDate: true, type: true, amountInBase: true },
+    });
+
+    const buckets = new Map<string, { month: string; income: number; expense: number }>();
+    for (let i = 0; i < months; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - (months - 1) + i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      buckets.set(key, { month: key, income: 0, expense: 0 });
+    }
+
+    for (const r of rows) {
+      const d = new Date(r.transactionDate);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const bucket = buckets.get(key);
+      if (!bucket) continue;
+      const amt = Number(r.amountInBase);
+      if (r.type === TransactionType.INCOME) bucket.income += amt;
+      else if (r.type === TransactionType.EXPENSE) bucket.expense += amt;
+    }
+
+    res.json({ success: true, data: Array.from(buckets.values()) });
+  }),
+);
+
+router.get(
+  '/recent-transactions',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery & { limit?: string };
+    const limit = Math.min(Math.max(parseInt(query.limit ?? '10', 10) || 10, 1), 50);
+    const recentWhere: Prisma.TransactionWhereInput = {
+      status: { notIn: [TransactionStatus.VOIDED, TransactionStatus.REJECTED] },
+    };
+    if (query.companyId) recentWhere.companyId = query.companyId;
+    const { from, to } = parseDateRange(query);
+    if (query.from || query.to) {
+      recentWhere.transactionDate = { gte: from, lte: to };
+    }
+    const items = await prisma.transaction.findMany({
+      take: limit,
+      orderBy: { transactionDate: 'desc' },
+      where: recentWhere,
+      select: {
+        id: true,
+        reference: true,
+        transactionDate: true,
+        type: true,
+        amount: true,
+        amountInBase: true,
+        currency: true,
+        description: true,
+        company: { select: { id: true, code: true, name: true } },
+        bankAccount: { select: { id: true, accountNumber: true, accountName: true } },
+        category: { select: { id: true, code: true, name: true, color: true, icon: true } },
+      },
+    });
+    res.json({ success: true, data: items });
+  }),
+);
+
+router.get(
+  '/category-types',
+  asyncHandler(async (_req, res) => {
+    const total = await prisma.category.count({ where: { isActive: true } });
+    res.json({ success: true, data: { total } });
+  }),
+);
+/*
+router.get(
+  '/daily-summary',
+  asyncHandler(async (req, res) => {
+    const query = req.query as { from?: string; to?: string; companyId?: string };
+    const now = new Date();
+    const defaultFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultTo = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const fromDate = query.from ? new Date(query.from) : defaultFrom;
+    const toDate = query.to ? new Date(query.to) : defaultTo;
+    fromDate.setHours(0, 0, 0, 0);
+    toDate.setHours(23, 59, 59, 999);
+
+    // 1. Fetch all bank accounts (for closing balance computation)
+    const accountWhere: Prisma.BankAccountWhereInput = { isActive: true };
+    if (query.companyId) accountWhere.companyId = query.companyId;
+    const accounts = await prisma.bankAccount.findMany({
+      where: accountWhere,
+      select: {
+        id: true,
+        currency: true,
+        accountType: true,
+        currentBalance: true,
+        companyId: true,
+      },
+    });
+
+    // 2. Fetch all transactions from start of day to "now" (current real balance baseline)
+    //    We need txns AFTER the report range to subtract them from currentBalance,
+    //    and txns WITHIN the range to compute daily movements.
+    const txnWhere: Prisma.TransactionWhereInput = {
+      status: { notIn: [TransactionStatus.VOIDED, TransactionStatus.REJECTED, TransactionStatus.DRAFT] },
+      bankAccountId: { in: accounts.map((a) => a.id) },
+    };
+
+    const allTxns = await prisma.transaction.findMany({
+      where: txnWhere,
+      select: {
+        id: true,
+        transactionDate: true,
+        type: true,
+        amount: true,
+        currency: true,
+        exchangeRate: true,
+        amountInBase: true,
+        bankAccountId: true,
+      },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    // Helper: format a Date to "YYYY-MM-DD" in local time
+    const dayKey = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
+    // 3. Compute per-account opening balance at the START of the range:
+    //    openingBalance(start) = currentBalance - sum(txns from start onwards signed)
+    const accountOpening = new Map<string, number>();
+    for (const a of accounts) {
+      accountOpening.set(a.id, Number(a.currentBalance));
+    }
+    for (const t of allTxns) {
+      const txnDate = new Date(t.transactionDate);
+      if (txnDate >= fromDate) {
+        // reverse this transaction from currentBalance to get opening
+        const signed = t.type === TransactionType.INCOME ? Number(t.amount) : -Number(t.amount);
+        const cur = accountOpening.get(t.bankAccountId) ?? 0;
+        accountOpening.set(t.bankAccountId, cur - signed);
+      }
+    }
+
+    // 4. Build list of all days in range
+    const days: string[] = [];
+    const cursor = new Date(fromDate);
+    while (cursor <= toDate) {
+      days.push(dayKey(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    // 5. Group transactions by date within range
+    type DayMovement = {
+      income: Record<string, number>;
+      expense: Record<string, number>;
+      rates: Record<string, { sum: number; count: number }>;
+    };
+    const movements = new Map<string, DayMovement>();
+    for (const d of days) {
+      movements.set(d, { income: {}, expense: {}, rates: {} });
+    }
+    for (const t of allTxns) {
+      const txnDate = new Date(t.transactionDate);
+      if (txnDate < fromDate || txnDate > toDate) continue;
+      const k = dayKey(txnDate);
+      const m = movements.get(k);
+      if (!m) continue;
+      const amt = Number(t.amount);
+      if (t.type === TransactionType.INCOME) {
+        m.income[t.currency] = (m.income[t.currency] ?? 0) + amt;
+      } else if (t.type === TransactionType.EXPENSE) {
+        m.expense[t.currency] = (m.expense[t.currency] ?? 0) + amt;
+      }
+      // Track exchange rates per currency (average over the day)
+      if (t.currency !== 'LAK') {
+        const r = m.rates[t.currency] ?? { sum: 0, count: 0 };
+        r.sum += Number(t.exchangeRate);
+        r.count += 1;
+        m.rates[t.currency] = r;
+      }
+    }
+
+    // 6. Walk forward day by day to compute running balances per account
+    const runningBalances = new Map<string, number>(accountOpening);
+    // Per-currency running rate (last known rate, defaulting to 1)
+    const lastRates: Record<string, number> = { LAK: 1, THB: 1, USD: 1, CNY: 1, VND: 1 };
+    // Initialize default exchange rates from the most recent ExchangeRate records to LAK
+    const latestRates = await prisma.exchangeRate.findMany({
+      where: { toCurrency: 'LAK', effectiveAt: { lte: toDate } },
+      orderBy: { effectiveAt: 'desc' },
+      take: 50,
+    });
+    const seenRates = new Set<string>();
+    for (const r of latestRates) {
+      if (seenRates.has(r.fromCurrency)) continue;
+      seenRates.add(r.fromCurrency);
+      lastRates[r.fromCurrency] = Number(r.rate);
+    }
+
+    const rows: {
+      date: string;
+      totalEquivLAK: number;
+      usableLAK: number;
+      stuckLAK: number;
+      balances: Record<string, number>;
+      income: Record<string, number>;
+      expense: Record<string, number>;
+      rates: Record<string, number>;
+      checkVsPrev: number;
+      checkIncomeExpense: number;
+      fxDiff: number;
+    }[] = [];
+
+    let prevTotalEquivLAK = 0;
+
+    for (let i = 0; i < days.length; i++) {
+      const d = days[i];
+      const move = movements.get(d)!;
+
+      // Update running balances by today's movements
+      for (const t of allTxns) {
+        if (dayKey(new Date(t.transactionDate)) !== d) continue;
+        const signed = t.type === TransactionType.INCOME ? Number(t.amount) : -Number(t.amount);
+        const cur = runningBalances.get(t.bankAccountId) ?? 0;
+        runningBalances.set(t.bankAccountId, cur + signed);
+      }
+
+      // Update lastRates from today's transactions (if any)
+      for (const [curCode, agg] of Object.entries(move.rates)) {
+        if (agg.count > 0) lastRates[curCode] = agg.sum / agg.count;
+      }
+
+      // Aggregate balances per currency + per account type
+      const balancesByCurrency: Record<string, number> = {};
+      let usableLAKEquiv = 0;
+      let stuckLAKEquiv = 0;
+      for (const a of accounts) {
+        const bal = runningBalances.get(a.id) ?? 0;
+        balancesByCurrency[a.currency] = (balancesByCurrency[a.currency] ?? 0) + bal;
+        const rate = lastRates[a.currency] || 1;
+        const equiv = bal * rate;
+        if (a.accountType === 'USABLE') usableLAKEquiv += equiv;
+        else stuckLAKEquiv += equiv;
+      }
+      const totalEquivLAK = usableLAKEquiv + stuckLAKEquiv;
+
+      // Cross-check: compare totalEquivLAK with previous day + today's net (in LAK equiv)
+      let todaysNetLAK = 0;
+      for (const [c, v] of Object.entries(move.income)) {
+        todaysNetLAK += v * (lastRates[c] || 1);
+      }
+      for (const [c, v] of Object.entries(move.expense)) {
+        todaysNetLAK -= v * (lastRates[c] || 1);
+      }
+      const checkVsPrev = i === 0 ? totalEquivLAK : totalEquivLAK - (prevTotalEquivLAK + todaysNetLAK);
+
+      // Cross-check: income - expense for the day in LAK equiv
+      const checkIncomeExpense = todaysNetLAK;
+
+      // FX difference: change in total not explained by movements
+      let fxDiff = 0;
+      if (i > 0) {
+        const movementSumLAK = todaysNetLAK;
+        const balanceDelta = totalEquivLAK - prevTotalEquivLAK;
+        fxDiff = balanceDelta - movementSumLAK;
+      }
+
+      rows.push({
+        date: d,
+        totalEquivLAK,
+        usableLAK: usableLAKEquiv,
+        stuckLAK: stuckLAKEquiv,
+        balances: balancesByCurrency,
+        income: move.income,
+        expense: move.expense,
+        rates: { ...lastRates },
+        checkVsPrev,
+        checkIncomeExpense,
+        fxDiff,
+      });
+
+      prevTotalEquivLAK = totalEquivLAK;
+    }
+
+    // Discover all currencies actually used in the range (so columns are stable)
+    const currencySet = new Set<string>();
+    for (const a of accounts) currencySet.add(a.currency);
+    for (const t of allTxns) currencySet.add(t.currency);
+    if (currencySet.size === 0) currencySet.add('LAK');
+
+    res.json({
+      success: true,
+      data: {
+        from: fromDate,
+        to: toDate,
+        currencies: Array.from(currencySet),
+        rows,
+      },
+    });
+  }),
+);*/
+router.get(
+  '/daily-summary',
+  asyncHandler(async (req, res) => {
+    const query = req.query as {
+      from?: string;
+      to?: string;
+      companyId?: string;
+    };
+
+    const now = new Date();
+
+    const defaultFrom = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      1,
+    );
+
+    const defaultTo = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+
+    const fromDate = query.from
+      ? new Date(query.from)
+      : defaultFrom;
+
+    const toDate = query.to
+      ? new Date(query.to)
+      : defaultTo;
+
+    fromDate.setHours(0, 0, 0, 0);
+    toDate.setHours(23, 59, 59, 999);
+
+    const round2 = (n: number) =>
+      Math.round((n + Number.EPSILON) * 100) / 100;
+
+    // =====================================================
+    // 1. BANK ACCOUNTS
+    // =====================================================
+
+    const accountWhere: Prisma.BankAccountWhereInput = {
+      isActive: true,
+    };
+
+    if (query.companyId) {
+      accountWhere.companyId = query.companyId;
+    }
+
+    const accounts = await prisma.bankAccount.findMany({
+      where: accountWhere,
+      select: {
+        id: true,
+        currency: true,
+        accountType: true,
+        companyId: true,
+      },
+    });
+
+    // =====================================================
+    // 2. TRANSACTIONS IN RANGE ONLY
+    // =====================================================
+
+    const txnWhere: Prisma.TransactionWhereInput = {
+      status: {
+        notIn: [
+          TransactionStatus.VOIDED,
+          TransactionStatus.REJECTED,
+          TransactionStatus.DRAFT,
+        ],
+      },
+      bankAccountId: {
+        in: accounts.map((a) => a.id),
+      },
+      transactionDate: {
+        gte: fromDate,
+        lte: toDate,
+      },
+    };
+
+    const txns = await prisma.transaction.findMany({
+      where: txnWhere,
+      select: {
+        id: true,
+        transactionDate: true,
+        type: true,
+        amount: true,
+        currency: true,
+        exchangeRate: true,
+        amountInBase: true,
+        bankAccountId: true,
+      },
+      orderBy: {
+        transactionDate: 'asc',
+      },
+    });
+
+    // =====================================================
+    // 3. DATE HELPER
+    // =====================================================
+
+    const dayKey = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+
+      return `${y}-${m}-${day}`;
+    };
+
+    // =====================================================
+    // 4. ALL DAYS
+    // =====================================================
+
+    const days: string[] = [];
+
+    const cursor = new Date(fromDate);
+
+    while (cursor <= toDate) {
+      days.push(dayKey(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    // =====================================================
+    // 5. LATEST EXCHANGE RATES (stored as fromCurrency → LAK)
+    // =====================================================
+
+    const lastRates: Record<string, number> = {
+      LAK: 1,
+    };
+
+    const latestRates = await prisma.exchangeRate.findMany({
+      where: {
+        toCurrency: 'LAK',
+        effectiveAt: {
+          lte: toDate,
+        },
+      },
+      orderBy: {
+        effectiveAt: 'desc',
+      },
+      take: 50,
+    });
+
+    const seenRates = new Set<string>();
+
+    for (const r of latestRates) {
+      if (seenRates.has(r.fromCurrency)) continue;
+      seenRates.add(r.fromCurrency);
+      // rate represents: 1 unit of fromCurrency = rate units of LAK
+      lastRates[r.fromCurrency] = Number(r.rate);
+    }
+
+    // =====================================================
+    // 6. BUILD DAILY ROWS
+    // =====================================================
+
+    const rows: {
+      date: string;
+
+      totalEquivLAK: number;
+
+      usableLAK: number;
+
+      stuckLAK: number;
+
+      balances: Record<string, number>;
+
+      income: Record<string, number>;
+
+      expense: Record<string, number>;
+
+      rates: Record<string, number>;
+
+      checkIncomeExpense: number;
+    }[] = [];
+
+    for (const d of days) {
+      // ---------------------------------------------
+      // FILTER TXNS OF THIS DAY ONLY
+      // ---------------------------------------------
+
+      const dayTxns = txns.filter(
+        (t) => dayKey(new Date(t.transactionDate)) === d,
+      );
+
+      // ---------------------------------------------
+      // DAILY MOVEMENT
+      // ---------------------------------------------
+
+      const income: Record<string, number> = {};
+
+      const expense: Record<string, number> = {};
+
+      const balances: Record<string, number> = {};
+
+      let usableLAK = 0;
+
+      let stuckLAK = 0;
+
+      for (const t of dayTxns) {
+        const amount = Number(t.amount);
+        const currency = t.currency;
+
+        // Update rate from transaction (store transaction-specific rate)
+        // This ensures we use the rate that was used when the transaction was created
+        if (
+          currency !== 'LAK' &&
+          Number(t.exchangeRate) > 0
+        ) {
+          lastRates[currency] = Number(t.exchangeRate);
+        }
+
+        const rate = lastRates[currency] || 1;
+
+        // signed amount
+        const signed =
+          t.type === TransactionType.INCOME
+            ? amount
+            : -amount;
+
+        // balances per currency
+        balances[currency] =
+          (balances[currency] ?? 0) + signed;
+
+        // income / expense
+        if (t.type === TransactionType.INCOME) {
+          income[currency] =
+            (income[currency] ?? 0) + amount;
+        }
+
+        if (t.type === TransactionType.EXPENSE) {
+          expense[currency] =
+            (expense[currency] ?? 0) + amount;
+        }
+
+        // account type
+        const account = accounts.find(
+          (a) => a.id === t.bankAccountId,
+        );
+
+        const equivLAK = signed * rate;
+
+        if (account?.accountType === 'USABLE') {
+          usableLAK += equivLAK;
+        } else {
+          stuckLAK += equivLAK;
+        }
+      }
+
+      // ---------------------------------------------
+      // TOTAL
+      // ---------------------------------------------
+
+      const totalEquivLAK =
+        usableLAK + stuckLAK;
+
+      // ---------------------------------------------
+      // CHECK
+      // ---------------------------------------------
+
+      let incomeLAK = 0;
+
+      let expenseLAK = 0;
+
+      for (const [c, v] of Object.entries(
+        income,
+      )) {
+        incomeLAK += v * (lastRates[c] || 1);
+      }
+
+      for (const [c, v] of Object.entries(
+        expense,
+      )) {
+        expenseLAK += v * (lastRates[c] || 1);
+      }
+
+      const checkIncomeExpense = round2(
+        incomeLAK - expenseLAK,
+      );
+
+      // ---------------------------------------------
+      // PUSH
+      // ---------------------------------------------
+
+      rows.push({
+        date: d,
+
+        totalEquivLAK: round2(
+          totalEquivLAK,
+        ),
+
+        usableLAK: round2(usableLAK),
+
+        stuckLAK: round2(stuckLAK),
+
+        balances,
+
+        income,
+
+        expense,
+
+        rates: { ...lastRates },
+
+        checkIncomeExpense,
+      });
+    }
+
+    // =====================================================
+    // 7. CURRENCIES
+    // =====================================================
+
+    const currencySet = new Set<string>();
+
+    for (const a of accounts) {
+      currencySet.add(a.currency);
+    }
+
+    for (const t of txns) {
+      currencySet.add(t.currency);
+    }
+
+    if (currencySet.size === 0) {
+      currencySet.add('LAK');
+    }
+
+    // =====================================================
+    // RESPONSE
+    // =====================================================
+
+    res.json({
+      success: true,
+      data: {
+        from: fromDate,
+        to: toDate,
+        currencies: Array.from(currencySet),
+        rows,
+      },
+    });
+  }),
+);
+
+router.get(
+  '/monthly-report',
+  asyncHandler(async (req, res) => {
+    const query = req.query as { year?: string; month?: string; companyId?: string };
+    const now = new Date();
+    const year = parseInt(query.year ?? `${now.getFullYear()}`, 10) || now.getFullYear();
+    const month = parseInt(query.month ?? `${now.getMonth() + 1}`, 10) || now.getMonth() + 1;
+
+    const from = new Date(year, month - 1, 1, 0, 0, 0, 0);
+    const to = new Date(year, month, 0, 23, 59, 59, 999);
+
+    const where: Prisma.TransactionWhereInput = {
+      transactionDate: { gte: from, lte: to },
+      status: { notIn: [TransactionStatus.VOIDED, TransactionStatus.REJECTED, TransactionStatus.DRAFT] },
+    };
+    if (query.companyId) where.companyId = query.companyId;
+
+    const txns = await prisma.transaction.findMany({
+      where,
+      orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }],
+      select: {
+        id: true,
+        reference: true,
+        transactionDate: true,
+        type: true,
+        amount: true,
+        currency: true,
+        exchangeRate: true,
+        amountInBase: true,
+        description: true,
+        note: true,
+        company: { select: { id: true, code: true, name: true } },
+        bankAccount: { select: { id: true, accountNumber: true, accountName: true } },
+        category: { select: { id: true, code: true, name: true } },
+        subCategory: { select: { id: true, code: true, name: true } },
+      },
+    });
+
+    type CurrencyTotals = Record<string, number>;
+    type SubCatRow = { subCategoryId: string | null; name: string; totals: CurrencyTotals; count: number };
+    type CatRow = {
+      categoryId: string | null;
+      name: string;
+      txnType: 'INCOME' | 'EXPENSE';
+      totals: CurrencyTotals;
+      count: number;
+      subCategories: Map<string, SubCatRow>;
+    };
+
+    const incomeCats = new Map<string, CatRow>();
+    const expenseCats = new Map<string, CatRow>();
+    const grandTotals: { income: CurrencyTotals; expense: CurrencyTotals } = {
+      income: {},
+      expense: {},
+    };
+
+    for (const t of txns) {
+      if (t.type === TransactionType.TRANSFER) continue;
+      const isIncome = t.type === TransactionType.INCOME;
+      const catBucket = isIncome ? incomeCats : expenseCats;
+      const grandBucket = isIncome ? grandTotals.income : grandTotals.expense;
+
+      const catKey = t.category?.id ?? '__none__';
+      const catName = t.category?.name ?? 'ບໍ່ໄດ້ກຳນົດໝວດ';
+      const subKey = t.subCategory?.id ?? '__none__';
+      const subName = t.subCategory?.name ?? '';
+
+      if (!catBucket.has(catKey)) {
+        catBucket.set(catKey, {
+          categoryId: t.category?.id ?? null,
+          name: catName,
+          txnType: isIncome ? 'INCOME' : 'EXPENSE',
+          totals: {},
+          count: 0,
+          subCategories: new Map(),
+        });
+      }
+      const cat = catBucket.get(catKey)!;
+      const amt = Number(t.amount);
+      cat.totals[t.currency] = (cat.totals[t.currency] ?? 0) + amt;
+      cat.count += 1;
+      grandBucket[t.currency] = (grandBucket[t.currency] ?? 0) + amt;
+
+      if (!cat.subCategories.has(subKey)) {
+        cat.subCategories.set(subKey, {
+          subCategoryId: t.subCategory?.id ?? null,
+          name: subName,
+          totals: {},
+          count: 0,
+        });
+      }
+      const sub = cat.subCategories.get(subKey)!;
+      sub.totals[t.currency] = (sub.totals[t.currency] ?? 0) + amt;
+      sub.count += 1;
+    }
+
+    const serializeCat = (c: CatRow) => ({
+      categoryId: c.categoryId,
+      name: c.name,
+      txnType: c.txnType,
+      totals: c.totals,
+      count: c.count,
+      subCategories: Array.from(c.subCategories.values()).map((s) => ({
+        subCategoryId: s.subCategoryId,
+        name: s.name,
+        totals: s.totals,
+        count: s.count,
+      })),
+    });
+
+    res.json({
+      success: true,
+      data: {
+        year,
+        month,
+        from,
+        to,
+        transactions: txns,
+        summary: {
+          income: Array.from(incomeCats.values()).map(serializeCat),
+          expense: Array.from(expenseCats.values()).map(serializeCat),
+          totals: grandTotals,
+        },
+      },
+    });
+  }),
+);
+
+router.get(
+  '/category-type-summary',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const baseWhere = buildBaseWhere(query);
+
+    const grouped = await prisma.transaction.groupBy({
+      by: ['type'],
+      where: baseWhere,
+      _sum: { amountInBase: true },
+      _count: true,
+    });
+
+    type Bucket = { key: string; label: string; amount: number; count: number };
+    const totals: Record<string, Bucket> = {
+      INCOME: { key: 'INCOME', label: 'ໂອນເຂົ້າ', amount: 0, count: 0 },
+      EXPENSE: { key: 'EXPENSE', label: 'ໂອນອອກ', amount: 0, count: 0 },
+      TRANSFER: { key: 'TRANSFER', label: 'ໂອນ', amount: 0, count: 0 },
+    };
+
+    for (const g of grouped) {
+      const amount = Number(g._sum.amountInBase ?? 0);
+      const key = g.type as string;
+      if (totals[key]) {
+        totals[key].amount += amount;
+        totals[key].count += g._count;
+      }
+    }
+
+    const totalAmount = Object.values(totals).reduce((sum, b) => sum + b.amount, 0);
+    const items = Object.values(totals).map((b) => ({
+      ...b,
+      percentage: totalAmount > 0 ? (b.amount / totalAmount) * 100 : 0,
+    }));
+
+    res.json({ success: true, data: { total: totalAmount, items } });
+  }),
+);
+
+// ──────────────────────────────────────────────────────────────
+// Sheet-view endpoints for the 7-tab Reports UI
+// ──────────────────────────────────────────────────────────────
+
+// Sheet 2: Master Ledger — transactions with per-account running balance
+router.get(
+  '/sheet-master-ledger',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const { from, to } = parseDateRange(query);
+
+    const [accounts, latestRates] = await Promise.all([
+      prisma.bankAccount.findMany({
+        where: { isActive: true, ...(query.companyId ? { companyId: query.companyId } : {}) },
+        include: { bank: true, company: true },
+        orderBy: [{ company: { code: 'asc' } }, { bank: { code: 'asc' } }],
+      }),
+      prisma.exchangeRate.findMany({
+        where: { toCurrency: 'LAK', effectiveAt: { lte: to } },
+        orderBy: { effectiveAt: 'desc' },
+        take: 50,
+      }),
+    ]);
+
+    const rates: Record<string, number> = { LAK: 1, THB: 660, USD: 21500 };
+    const seen = new Set<string>();
+    for (const r of latestRates) {
+      if (!seen.has(r.fromCurrency)) { seen.add(r.fromCurrency); rates[r.fromCurrency] = Number(r.rate); }
+    }
+
+    const txns = await prisma.transaction.findMany({
+      where: {
+        transactionDate: { gte: from, lte: to },
+        status: { in: ['POSTED', 'APPROVED'] },
+        ...(query.companyId ? { companyId: query.companyId } : {}),
+      },
+      include: { company: true, bankAccount: { include: { bank: true } }, category: true },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    // Build account columns (sorted same as export service)
+    const acctCols = accounts.map((a) => ({
+      id: a.id,
+      bankCode: a.bank.code,
+      accountName: a.accountName,
+      currency: a.currency,
+      companyName: a.company.name,
+    }));
+    acctCols.sort(
+      (a, b) =>
+        a.bankCode.localeCompare(b.bankCode) ||
+        a.currency.localeCompare(b.currency) ||
+        a.accountName.localeCompare(b.accountName),
+    );
+
+    const acctIdx = new Map<string, number>(acctCols.map((a, i) => [a.id, i]));
+    const balance: number[] = new Array(acctCols.length).fill(0);
+
+    const rows = txns
+      .filter((t) => acctIdx.has(t.bankAccountId))
+      .map((t) => {
+        const i = acctIdx.get(t.bankAccountId)!;
+        const amt = Number(t.amount);
+        if (t.type === TransactionType.INCOME) balance[i] += amt;
+        else if (t.type === TransactionType.EXPENSE) balance[i] -= amt;
+        return {
+          id: t.id,
+          date: t.transactionDate,
+          description: t.description,
+          company: t.company ? { id: t.company.id, code: t.company.code, name: t.company.name } : null,
+          type: t.type,
+          amount: Number(t.amount),
+          currency: t.currency,
+          accountIdx: i,
+          balanceSnapshot: [...balance],
+        };
+      });
+
+    res.json({
+      success: true,
+      data: {
+        accounts: acctCols,
+        rates,
+        rows,
+        totals: { balance: [...balance] },
+      },
+    });
+  }),
+);
+
+// Sheet 7: Stuck Assets — STUCK/COLLATERAL accounts with LAK equivalent
+router.get(
+  '/sheet-stuck-assets',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const { to } = parseDateRange(query);
+
+    const [accounts, latestRates] = await Promise.all([
+      prisma.bankAccount.findMany({
+        where: {
+          isActive: true,
+          accountType: { in: ['STUCK', 'COLLATERAL'] },
+          ...(query.companyId ? { companyId: query.companyId } : {}),
+        },
+        include: { bank: true, company: true },
+        orderBy: [{ company: { code: 'asc' } }, { bank: { code: 'asc' } }],
+      }),
+      prisma.exchangeRate.findMany({
+        where: { toCurrency: 'LAK', effectiveAt: { lte: to } },
+        orderBy: { effectiveAt: 'desc' },
+        take: 50,
+      }),
+    ]);
+
+    const rates: Record<string, number> = { LAK: 1, THB: 660, USD: 21500 };
+    const seen = new Set<string>();
+    for (const r of latestRates) {
+      if (!seen.has(r.fromCurrency)) { seen.add(r.fromCurrency); rates[r.fromCurrency] = Number(r.rate); }
+    }
+
+    let totalLAK = 0;
+    const items = accounts.map((a) => {
+      const amt = Number(a.currentBalance);
+      const lak = Math.round(amt * (rates[a.currency] ?? 1) * 100) / 100;
+      totalLAK += lak;
+      return {
+        id: a.id,
+        accountName: a.accountName,
+        accountNumber: a.accountNumber,
+        accountType: a.accountType,
+        currency: a.currency,
+        balance: amt,
+        balanceLAK: lak,
+        bankCode: a.bank.code,
+        bankName: a.bank.name,
+        companyName: a.company.name,
+      };
+    });
+
+    res.json({ success: true, data: { rates, items, totalLAK: Math.round(totalLAK * 100) / 100 } });
+  }),
+);
+
+// Sheet 8: Fund — FUND account transactions with running balance
+router.get(
+  '/sheet-fund',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const { from, to } = parseDateRange(query);
+
+    const [fundAccounts, latestRates] = await Promise.all([
+      prisma.bankAccount.findMany({
+        where: {
+          isActive: true,
+          OR: [
+            { accountType: 'FUND' },
+            { accountName: { contains: 'ກອງທຶນ' } },
+            { accountName: { contains: 'yamamoto', mode: 'insensitive' } },
+          ],
+          ...(query.companyId ? { companyId: query.companyId } : {}),
+        },
+        include: { bank: true, company: true },
+      }),
+      prisma.exchangeRate.findMany({
+        where: { toCurrency: 'LAK', effectiveAt: { lte: to } },
+        orderBy: { effectiveAt: 'desc' },
+        take: 50,
+      }),
+    ]);
+
+    const rates: Record<string, number> = { LAK: 1, THB: 660, USD: 21500 };
+    const seen = new Set<string>();
+    for (const r of latestRates) {
+      if (!seen.has(r.fromCurrency)) { seen.add(r.fromCurrency); rates[r.fromCurrency] = Number(r.rate); }
+    }
+
+    const fundIds = fundAccounts.map((a) => a.id);
+    const txns = await prisma.transaction.findMany({
+      where: {
+        transactionDate: { gte: from, lte: to },
+        status: { in: ['POSTED', 'APPROVED'] },
+        bankAccountId: { in: fundIds },
+      },
+      include: { company: true, bankAccount: { include: { bank: true } } },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    let running = 0;
+    const rows = txns.map((t) => {
+      const amt = Number(t.amount);
+      const sign = t.type === TransactionType.INCOME ? 1 : -1;
+      const lak = Math.round(amt * (rates[t.currency] ?? 1) * sign * 100) / 100;
+      running += lak;
+      return {
+        id: t.id,
+        date: t.transactionDate,
+        description: t.description,
+        currency: t.currency,
+        amount: amt,
+        amountLAK: lak,
+        type: t.type,
+        runningBalance: Math.round(running * 100) / 100,
+      };
+    });
+
+    res.json({ success: true, data: { rates, rows, totalBalance: Math.round(running * 100) / 100 } });
+  }),
+);
+
+// Sheet 10: Ministry 5% — ODSc account ledger
+router.get(
+  '/sheet-ministry',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const { from, to } = parseDateRange(query);
+
+    const account = await prisma.bankAccount.findFirst({
+      where: {
+        isActive: true,
+        OR: [
+          { accountName: { contains: 'ກະຊວງ' } },
+          { accountName: { contains: '5%' } },
+          { accountName: { contains: 'odsc', mode: 'insensitive' } },
+        ],
+        ...(query.companyId ? { companyId: query.companyId } : {}),
+      },
+      include: { bank: true, company: true },
+    });
+
+    const txns = account
+      ? await prisma.transaction.findMany({
+          where: {
+            transactionDate: { gte: from, lte: to },
+            status: { in: ['POSTED', 'APPROVED'] },
+            bankAccountId: account.id,
+          },
+          orderBy: { transactionDate: 'asc' },
+        })
+      : [];
+
+    const opening = account ? Number(account.openingBalance) : 0;
+    let bal = opening;
+    const rows = txns.map((t, i) => {
+      const out = t.type === TransactionType.EXPENSE ? Number(t.amount) : 0;
+      bal -= out;
+      return {
+        seq: i + 1,
+        id: t.id,
+        date: t.transactionDate,
+        description: t.description,
+        expense: out || null,
+        balance: Math.round(bal * 100) / 100,
+        note: t.note ?? '',
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        account: account
+          ? { id: account.id, accountName: account.accountName, bankCode: account.bank.code }
+          : null,
+        opening,
+        rows,
+        closing: Math.round(bal * 100) / 100,
+      },
+    });
+  }),
+);
+
+// Sheet 11: Debts — LAK side (BCEL) and USD side (JDB) dual-column
+router.get(
+  '/sheet-debts',
+  asyncHandler(async (req, res) => {
+    const query = req.query as DateRangeQuery;
+    const { from, to } = parseDateRange(query);
+
+    const txns = await prisma.transaction.findMany({
+      where: {
+        transactionDate: { gte: from, lte: to },
+        status: { in: ['POSTED', 'APPROVED'] },
+        OR: [
+          { category: { name: { contains: 'ໜີ້' } } },
+          { category: { name: { contains: 'ພາຈ່າຍ' } } },
+          { note: { contains: 'ໜີ້' } },
+          { note: { contains: 'ພາຈ່າຍ' } },
+        ],
+        ...(query.companyId ? { companyId: query.companyId } : {}),
+      },
+      include: { company: true, bankAccount: { include: { bank: true } }, category: true },
+      orderBy: { transactionDate: 'asc' },
+    });
+
+    const lakSide = txns.filter((t) => t.currency === 'LAK');
+    const usdSide = txns.filter((t) => t.currency === 'USD');
+
+    let lakBal = 0;
+    const lakRows = lakSide.map((t, i) => {
+      lakBal += Number(t.amount);
+      return {
+        seq: i + 1, id: t.id, date: t.transactionDate,
+        amount: Number(t.amount), sent: null, balance: Math.round(lakBal * 100) / 100,
+        description: t.description,
+      };
+    });
+
+    let usdBal = 0;
+    const usdRows = usdSide.map((t, i) => {
+      usdBal += Number(t.amount);
+      return {
+        seq: i + 1, id: t.id, date: t.transactionDate,
+        amount: Number(t.amount), sent: null, balance: Math.round(usdBal * 100) / 100,
+        description: t.description,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        lakSide: lakRows,
+        usdSide: usdRows,
+        lakTotal: Math.round(lakBal * 100) / 100,
+        usdTotal: Math.round(usdBal * 100) / 100,
+      },
+    });
+  }),
+);
+
+export default router;
