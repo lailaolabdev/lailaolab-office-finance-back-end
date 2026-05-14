@@ -151,6 +151,35 @@ function borderAllCells(ws: XLSX.WorkSheet, dataRowStart: number) {
   }
 }
 
+// Format all number cells as comma-separated with 2 decimals
+function formatAllNumbers(ws: XLSX.WorkSheet) {
+  const ref = ws['!ref'];
+  if (!ref) return;
+  const range = XLSX.utils.decode_range(ref);
+  
+  // Find columns that are "ລ/ດ"
+  const skipCols = new Set<number>();
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    for (let r = 0; r <= Math.min(range.e.r, 5); r++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (ws[addr] && typeof ws[addr].v === 'string' && ws[addr].v === 'ລ/ດ') {
+        skipCols.add(c);
+        break;
+      }
+    }
+  }
+
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      if (skipCols.has(c)) continue;
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (ws[addr] && ws[addr].t === 'n') {
+        ws[addr].z = '#,##0.00';
+      }
+    }
+  }
+}
+
 // ============================================================
 // Utilities
 // ============================================================
@@ -837,6 +866,7 @@ export const exportService = {
     ];
 
     for (const s of sheets) {
+      formatAllNumbers(s.ws);
       XLSX.utils.book_append_sheet(wb, s.ws, s.name.slice(0, 31));
     }
 
