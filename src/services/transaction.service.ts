@@ -510,6 +510,20 @@ export const transactionService = {
       _count: true,
     });
 
+    const byCurrencyCategory = await prisma.transaction.groupBy({
+      by: ['currency', 'categoryId', 'type'],
+      where,
+      _sum: { amount: true },
+      _count: true,
+    });
+
+    const byCurrencySubCategory = await prisma.transaction.groupBy({
+      by: ['currency', 'subCategoryId', 'categoryId', 'type'],
+      where: { ...where, subCategoryId: { not: null } },
+      _sum: { amount: true },
+      _count: true,
+    });
+
     // 2. Per category (parent) — use amountInBase for cross-currency totals
     const byCategory = await prisma.transaction.groupBy({
       by: ['categoryId', 'type'],
@@ -527,8 +541,8 @@ export const transactionService = {
     });
 
     // Fetch category & sub-category names in one shot
-    const catIds = [...new Set(byCategory.map((r) => r.categoryId).filter(Boolean) as string[])];
-    const subIds = [...new Set(bySubCategory.map((r) => r.subCategoryId).filter(Boolean) as string[])];
+    const catIds = [...new Set([...byCategory.map((r) => r.categoryId), ...byCurrencyCategory.map((r) => r.categoryId)].filter(Boolean) as string[])];
+    const subIds = [...new Set([...bySubCategory.map((r) => r.subCategoryId), ...byCurrencySubCategory.map((r) => r.subCategoryId)].filter(Boolean) as string[])];
 
     const [cats, subs] = await Promise.all([
       catIds.length
@@ -543,10 +557,10 @@ export const transactionService = {
     const subMap = Object.fromEntries(subs.map((s) => [s.id, s]));
 
     // Shape byCurrency into { currency, income, expense, incomeCount, expenseCount }
-    const currencyMap: Record<string, { currency: string; income: number; expense: number; incomeCount: number; expenseCount: number }> = {};
+    const currencyMap: Record<string, { currency: string; income: number; expense: number; incomeCount: number; expenseCount: number; categories: any[]; subCategories: any[] }> = {};
     for (const row of byCurrency) {
       if (!currencyMap[row.currency]) {
-        currencyMap[row.currency] = { currency: row.currency, income: 0, expense: 0, incomeCount: 0, expenseCount: 0 };
+        currencyMap[row.currency] = { currency: row.currency, income: 0, expense: 0, incomeCount: 0, expenseCount: 0, categories: [], subCategories: [] };
       }
       const amt = Number(row._sum.amount ?? 0);
       if (row.type === 'INCOME') {
@@ -556,6 +570,39 @@ export const transactionService = {
         currencyMap[row.currency].expense += amt;
         currencyMap[row.currency].expenseCount += row._count;
       }
+    }
+
+    for (const row of byCurrencyCategory) {
+      if (!currencyMap[row.currency]) continue;
+      let catObj = currencyMap[row.currency].categories.find((c) => c.categoryId === row.categoryId);
+      if (!catObj) {
+        const cat = row.categoryId ? catMap[row.categoryId] : null;
+        catObj = { categoryId: row.categoryId, name: cat?.name ?? 'ບໍ່ມີໝວດ', code: cat?.code ?? '', income: 0, expense: 0, count: 0 };
+        currencyMap[row.currency].categories.push(catObj);
+      }
+      const amt = Number(row._sum.amount ?? 0);
+      if (row.type === 'INCOME') catObj.income += amt;
+      else if (row.type === 'EXPENSE') catObj.expense += amt;
+      catObj.count += row._count;
+    }
+
+    for (const row of byCurrencySubCategory) {
+      if (!row.subCategoryId || !currencyMap[row.currency]) continue;
+      let subObj = currencyMap[row.currency].subCategories.find((s) => s.subCategoryId === row.subCategoryId);
+      if (!subObj) {
+        const sub = subMap[row.subCategoryId];
+        subObj = { subCategoryId: row.subCategoryId, categoryId: row.categoryId, name: sub?.name ?? row.subCategoryId, code: sub?.code ?? '', income: 0, expense: 0, count: 0 };
+        currencyMap[row.currency].subCategories.push(subObj);
+      }
+      const amt = Number(row._sum.amount ?? 0);
+      if (row.type === 'INCOME') subObj.income += amt;
+      else if (row.type === 'EXPENSE') subObj.expense += amt;
+      subObj.count += row._count;
+    }
+
+    for (const cur of Object.values(currencyMap)) {
+      cur.categories.sort((a, b) => (b.income + b.expense) - (a.income + a.expense));
+      cur.subCategories.sort((a, b) => (b.income + b.expense) - (a.income + a.expense));
     }
 
     // Shape byCategory

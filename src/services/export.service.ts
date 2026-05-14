@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import { Prisma, TransactionType } from '@prisma/client';
 import { prisma } from '../config/prisma';
 
@@ -45,10 +45,10 @@ interface TxnWithRels {
 
 const THIN: CellStyle = {
   border: {
-    top: { style: 'thin', color: { rgb: 'AAAAAA' } },
-    bottom: { style: 'thin', color: { rgb: 'AAAAAA' } },
-    left: { style: 'thin', color: { rgb: 'AAAAAA' } },
-    right: { style: 'thin', color: { rgb: 'AAAAAA' } },
+    top: { style: 'thin', color: { rgb: '000000' } },
+    bottom: { style: 'thin', color: { rgb: '000000' } },
+    left: { style: 'thin', color: { rgb: '000000' } },
+    right: { style: 'thin', color: { rgb: '000000' } },
   },
 };
 
@@ -88,7 +88,9 @@ function styleRange(
   for (let r = r1; r <= r2; r++) {
     for (let c = c1; c <= c2; c++) {
       const addr = XLSX.utils.encode_cell({ r, c });
-      if (!ws[addr]) ws[addr] = { t: 'z', v: null };
+      if (!ws[addr] || ws[addr].t === 'z' || ws[addr].v === null || ws[addr].v === undefined) {
+        ws[addr] = { t: 's', v: '', s: ws[addr]?.s };
+      }
       ws[addr].s = style;
     }
   }
@@ -106,11 +108,13 @@ function styleCells(
   for (let r = r1; r <= r2; r++) {
     for (let c = c1; c <= c2; c++) {
       const addr = XLSX.utils.encode_cell({ r, c });
-      if (ws[addr] && ws[addr].v !== undefined && ws[addr].v !== null) {
+      if (ws[addr] && ws[addr].v !== undefined && ws[addr].v !== null && ws[addr].t !== 'z') {
         ws[addr].s = { ...THIN, ...style };
       } else {
         // Still put a border on empty cells that are "inside" the table
-        if (!ws[addr]) ws[addr] = { t: 'z', v: null };
+        if (!ws[addr] || ws[addr].t === 'z' || ws[addr].v === null || ws[addr].v === undefined) {
+          ws[addr] = { t: 's', v: '', s: ws[addr]?.s };
+        }
         ws[addr].s = THIN;
       }
     }
@@ -125,8 +129,24 @@ function borderAllCells(ws: XLSX.WorkSheet, dataRowStart: number) {
   for (let r = dataRowStart; r <= range.e.r; r++) {
     for (let c = range.s.c; c <= range.e.c; c++) {
       const addr = XLSX.utils.encode_cell({ r, c });
-      if (!ws[addr]) ws[addr] = { t: 'z', v: null };
-      if (!ws[addr].s) ws[addr].s = THIN;
+      
+      // Ensure empty cells are written as empty strings so borders are reliably rendered
+      if (!ws[addr] || ws[addr].t === 'z' || ws[addr].v === null || ws[addr].v === undefined) {
+        ws[addr] = { t: 's', v: '', s: ws[addr] ? ws[addr].s : undefined };
+      }
+      
+      const blackBorder = {
+        top: { style: 'thin', color: { rgb: '000000' } },
+        bottom: { style: 'thin', color: { rgb: '000000' } },
+        left: { style: 'thin', color: { rgb: '000000' } },
+        right: { style: 'thin', color: { rgb: '000000' } },
+      };
+
+      if (!ws[addr].s) {
+        ws[addr].s = { border: blackBorder };
+      } else {
+        ws[addr].s.border = { ...blackBorder, ...(ws[addr].s.border || {}) };
+      }
     }
   }
 }

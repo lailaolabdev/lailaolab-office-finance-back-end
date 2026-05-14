@@ -1257,15 +1257,28 @@ router.get(
     const query = req.query as DateRangeQuery;
     const { from, to } = parseDateRange(query);
 
+    const targetCompanies = await prisma.company.findMany({
+      where: {
+        OR: [
+          { name: { contains: 'ພາຈ່າຍ', mode: 'insensitive' } },
+          { name: { contains: 'phajay', mode: 'insensitive' } },
+          { nameEn: { contains: 'phajay', mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true },
+    });
+    const companyIds = targetCompanies.map((c) => c.id);
+
     const txns = await prisma.transaction.findMany({
       where: {
         transactionDate: { gte: from, lte: to },
         status: { in: ['POSTED', 'APPROVED'] },
         OR: [
-          { category: { name: { contains: 'ໜີ້' } } },
-          { category: { name: { contains: 'ພາຈ່າຍ' } } },
-          { note: { contains: 'ໜີ້' } },
-          { note: { contains: 'ພາຈ່າຍ' } },
+          { companyId: { in: companyIds } },
+          { category: { name: { contains: 'ຊັບສິນ' } } },
+          { category: { name: { contains: 'ໜີ້ສິນ' } } },
+          { note: { contains: 'ໜີ້ສິນ' } },
+          { note: { contains: 'ຊັບສິນ' } },
         ],
         ...(query.companyId ? { companyId: query.companyId } : {}),
       },
