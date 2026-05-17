@@ -141,11 +141,17 @@ model BankAccount {
 // CATEGORIES
 // ============================================================
 
+enum CategoryType {
+  EXPENSE
+  INCOME
+}
+
 model Category {
   id          String       @id @default(cuid())
   code        String       @unique
   name        String
   nameEn      String?
+  type        CategoryType @default(EXPENSE)
   icon        String?
   color       String?
   isActive    Boolean      @default(true)
@@ -156,6 +162,7 @@ model Category {
   subCategories SubCategory[]
   transactions  Transaction[]
 
+  @@index([type])
   @@map("categories")
 }
 
@@ -422,4 +429,27 @@ model ExchangeRate {
 
   @@unique([fromCurrency, toCurrency, effectiveAt])
   @@map("exchange_rates")
+}
+
+// ============================================================
+// NON-FINANCIAL ITEMS (ຊັບສິນທີ່ຫັກໄວ້ / ຊັບສິນທີ່ໃຊ້ບໍ່ໄດ້)
+// ============================================================
+
+enum NonFinancialItemType {
+  WITHHELD   // ຊັບສິນທີ່ຫັກໄວ້
+  UNUSABLE   // ຊັບສິນທີ່ໃຊ້ບໍ່ໄດ້
+}
+
+model NonFinancialItem {
+  id          String               @id @default(cuid())
+  type        NonFinancialItemType
+  description String
+  amount      Decimal              @db.Decimal(20, 2)
+  currency    String?
+  date        DateTime
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([type])
+  @@map("non_financial_items")
 }

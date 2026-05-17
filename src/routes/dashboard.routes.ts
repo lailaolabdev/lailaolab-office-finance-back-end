@@ -46,36 +46,119 @@ router.get(
     const query = req.query as DateRangeQuery;
     const baseWhere = buildBaseWhere(query);
 
-    const [companies, accounts, txnsToday, totalBalance, incomeAgg, expenseAgg, txnCount] =
-      await Promise.all([
-        prisma.company.count({ where: { isActive: true } }),
-        prisma.bankAccount.count({ where: { isActive: true } }),
-        prisma.transaction.count({
-          where: {
-            transactionDate: {
-              gte: new Date(new Date().setHours(0, 0, 0, 0)),
-            },
+    const [
+      companies,
+      accounts,
+      txnsToday,
+      totalBalance,
+      incomeAgg,
+      expenseAgg,
+      txnCount,
+      companyList,
+      perCompanyAgg,
+      perCompanyBalances,
+    ] = await Promise.all([
+      prisma.company.count({ where: { isActive: true } }),
+      prisma.bankAccount.count({ where: { isActive: true } }),
+      prisma.transaction.count({
+        where: {
+          transactionDate: {
+            gte: new Date(new Date().setHours(0, 0, 0, 0)),
           },
-        }),
-        prisma.bankAccount.aggregate({
-          where: { isActive: true, accountType: 'USABLE' },
-          _sum: { currentBalance: true },
-        }),
-        prisma.transaction.aggregate({
-          where: { ...baseWhere, type: TransactionType.INCOME },
-          _sum: { amountInBase: true },
-          _count: true,
-        }),
-        prisma.transaction.aggregate({
-          where: { ...baseWhere, type: TransactionType.EXPENSE },
-          _sum: { amountInBase: true },
-          _count: true,
-        }),
-        prisma.transaction.count({ where: baseWhere }),
-      ]);
+        },
+      }),
+      prisma.bankAccount.aggregate({
+        where: { isActive: true, accountType: 'USABLE' },
+        _sum: { currentBalance: true },
+      }),
+      prisma.transaction.aggregate({
+        where: { ...baseWhere, type: TransactionType.INCOME },
+        _sum: { amountInBase: true },
+        _count: true,
+      }),
+      prisma.transaction.aggregate({
+        where: { ...baseWhere, type: TransactionType.EXPENSE },
+        _sum: { amountInBase: true },
+        _count: true,
+      }),
+      prisma.transaction.count({ where: baseWhere }),
+      prisma.company.findMany({
+        where: { isActive: true, ...(query.companyId ? { id: query.companyId } : {}) },
+        select: { id: true, code: true, name: true, nameEn: true },
+        orderBy: { code: 'asc' },
+      }),
+      prisma.transaction.groupBy({
+        by: ['companyId', 'type'],
+        where: baseWhere,
+        _sum: { amountInBase: true },
+        _count: true,
+      }),
+      prisma.bankAccount.groupBy({
+        by: ['companyId'],
+        where: { isActive: true, accountType: 'USABLE', ...(query.companyId ? { companyId: query.companyId } : {}) },
+        _sum: { currentBalance: true },
+      }),
+    ]);
 
     const totalIncome = Number(incomeAgg._sum.amountInBase ?? 0);
     const totalExpense = Number(expenseAgg._sum.amountInBase ?? 0);
+
+    type CompanyStat = {
+      id: string;
+      code: string;
+      name: string;
+      nameEn: string | null;
+      totalIncome: number;
+      totalExpense: number;
+      incomeCount: number;
+      expenseCount: number;
+      txnCount: number;
+      usableBalance: number;
+      netCashflow: number;
+    };
+
+    const companyStats = new Map<string, CompanyStat>(
+      companyList.map((c) => [
+        c.id,
+        {
+          id: c.id,
+          code: c.code,
+          name: c.name,
+          nameEn: c.nameEn,
+          totalIncome: 0,
+          totalExpense: 0,
+          incomeCount: 0,
+          expenseCount: 0,
+          txnCount: 0,
+          usableBalance: 0,
+          netCashflow: 0,
+        },
+      ]),
+    );
+
+    for (const g of perCompanyAgg) {
+      const stat = companyStats.get(g.companyId);
+      if (!stat) continue;
+      const amt = Number(g._sum.amountInBase ?? 0);
+      if (g.type === TransactionType.INCOME) {
+        stat.totalIncome += amt;
+        stat.incomeCount += g._count;
+      } else if (g.type === TransactionType.EXPENSE) {
+        stat.totalExpense += amt;
+        stat.expenseCount += g._count;
+      }
+      stat.txnCount += g._count;
+    }
+
+    for (const b of perCompanyBalances) {
+      const stat = companyStats.get(b.companyId);
+      if (!stat) continue;
+      stat.usableBalance = Number(b._sum.currentBalance ?? 0);
+    }
+
+    const companyBreakdown = Array.from(companyStats.values())
+      .map((c) => ({ ...c, netCashflow: c.totalIncome - c.totalExpense }))
+      .sort((a, b) => b.totalExpense - a.totalExpense);
 
     res.json({
       success: true,
@@ -90,6 +173,7 @@ router.get(
         incomeCount: incomeAgg._count,
         expenseCount: expenseAgg._count,
         txnCount,
+        companyBreakdown,
       },
     });
   }),
@@ -563,6 +647,8 @@ router.get(
         exchangeRate: true,
         amountInBase: true,
         bankAccountId: true,
+        companyId: true,
+        company: { select: { id: true, code: true, name: true } },
       },
       orderBy: {
         transactionDate: 'asc',
@@ -628,6 +714,13 @@ router.get(
     // 6. BUILD DAILY ROWS
     // =====================================================
 
+    type CompanyDayCell = {
+      incomeLAK: number;
+      expenseLAK: number;
+      netLAK: number;
+      txnCount: number;
+    };
+
     const rows: {
       date: string;
 
@@ -646,7 +739,13 @@ router.get(
       rates: Record<string, number>;
 
       checkIncomeExpense: number;
+
+      companies: Record<string, CompanyDayCell>;
     }[] = [];
+
+    // Track distinct companies seen during the range so the frontend can render stable columns.
+    const companyMeta = new Map<string, { companyId: string | null; code: string; name: string }>();
+    const noCompanyKey = '__none__';
 
     for (const d of days) {
       // ---------------------------------------------
@@ -670,6 +769,8 @@ router.get(
       let usableLAK = 0;
 
       let stuckLAK = 0;
+
+      const companies: Record<string, CompanyDayCell> = {};
 
       for (const t of dayTxns) {
         const amount = Number(t.amount);
@@ -719,6 +820,43 @@ router.get(
         } else {
           stuckLAK += equivLAK;
         }
+
+        // per-company per-day (LAK-equivalent)
+        const coKey = t.company?.id ?? noCompanyKey;
+        if (!companyMeta.has(coKey)) {
+          companyMeta.set(coKey, {
+            companyId: t.company?.id ?? null,
+            code: t.company?.code ?? '-',
+            name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
+          });
+        }
+        const coCell = companies[coKey] ?? {
+          incomeLAK: 0,
+          expenseLAK: 0,
+          netLAK: 0,
+          txnCount: 0,
+        };
+        const amountLAK = amount * rate;
+        if (t.type === TransactionType.INCOME) {
+          coCell.incomeLAK += amountLAK;
+          coCell.netLAK += amountLAK;
+        } else if (t.type === TransactionType.EXPENSE) {
+          coCell.expenseLAK += amountLAK;
+          coCell.netLAK -= amountLAK;
+        }
+        coCell.txnCount += 1;
+        companies[coKey] = coCell;
+      }
+
+      // Round per-company cells for display.
+      for (const k of Object.keys(companies)) {
+        const c = companies[k];
+        companies[k] = {
+          incomeLAK: round2(c.incomeLAK),
+          expenseLAK: round2(c.expenseLAK),
+          netLAK: round2(c.netLAK),
+          txnCount: c.txnCount,
+        };
       }
 
       // ---------------------------------------------
@@ -776,6 +914,8 @@ router.get(
         rates: { ...lastRates },
 
         checkIncomeExpense,
+
+        companies,
       });
     }
 
@@ -798,8 +938,65 @@ router.get(
     }
 
     // =====================================================
+    // 8. COMPANY SUMMARY (across the entire range, LAK-equivalent)
+    // =====================================================
+
+    type CompanyDailySum = {
+      companyId: string | null;
+      code: string;
+      name: string;
+      totalIncome: Record<string, number>;
+      totalExpense: Record<string, number>;
+      totalIncomeLAK: number;
+      totalExpenseLAK: number;
+      txnCount: number;
+    };
+
+    const coMap = new Map<string, CompanyDailySum>();
+    for (const t of txns) {
+      const key = t.company?.id ?? '__none__';
+      if (!coMap.has(key)) {
+        coMap.set(key, {
+          companyId: t.company?.id ?? null,
+          code: t.company?.code ?? '-',
+          name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
+          totalIncome: {},
+          totalExpense: {},
+          totalIncomeLAK: 0,
+          totalExpenseLAK: 0,
+          txnCount: 0,
+        });
+      }
+      const entry = coMap.get(key)!;
+      const amt = Number(t.amount);
+      const rate = lastRates[t.currency] || 1;
+      entry.txnCount += 1;
+      if (t.type === TransactionType.INCOME) {
+        entry.totalIncome[t.currency] = (entry.totalIncome[t.currency] ?? 0) + amt;
+        entry.totalIncomeLAK += amt * rate;
+      } else if (t.type === TransactionType.EXPENSE) {
+        entry.totalExpense[t.currency] = (entry.totalExpense[t.currency] ?? 0) + amt;
+        entry.totalExpenseLAK += amt * rate;
+      }
+    }
+
+    const companySummary = Array.from(coMap.values())
+      .map((c) => ({
+        ...c,
+        totalIncomeLAK: round2(c.totalIncomeLAK),
+        totalExpenseLAK: round2(c.totalExpenseLAK),
+        netCashflowLAK: round2(c.totalIncomeLAK - c.totalExpenseLAK),
+      }))
+      .sort((a, b) => b.totalExpenseLAK - a.totalExpenseLAK);
+
+    // =====================================================
     // RESPONSE
     // =====================================================
+
+    // Stable list of companies seen in the range (for daily-table columns).
+    const companies = Array.from(companyMeta.entries())
+      .map(([key, meta]) => ({ key, ...meta }))
+      .sort((a, b) => a.code.localeCompare(b.code));
 
     res.json({
       success: true,
@@ -808,6 +1005,8 @@ router.get(
         to: toDate,
         currencies: Array.from(currencySet),
         rows,
+        companySummary,
+        companies,
       },
     });
   }),
@@ -1058,6 +1257,119 @@ router.get(
         };
       });
 
+    type CompanySum = {
+      companyId: string | null;
+      code: string;
+      name: string;
+      totalIncome: number;
+      totalExpense: number;
+      totalIncomeLAK: number;
+      totalExpenseLAK: number;
+      txnCount: number;
+    };
+    const companyMap = new Map<string, CompanySum>();
+    for (const t of txns) {
+      const cid = t.company?.id ?? '__none__';
+      if (!companyMap.has(cid)) {
+        companyMap.set(cid, {
+          companyId: t.company?.id ?? null,
+          code: t.company?.code ?? '-',
+          name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
+          totalIncome: 0,
+          totalExpense: 0,
+          totalIncomeLAK: 0,
+          totalExpenseLAK: 0,
+          txnCount: 0,
+        });
+      }
+      const stat = companyMap.get(cid)!;
+      const amt = Number(t.amount);
+      const rate = rates[t.currency] ?? 1;
+      stat.txnCount += 1;
+      if (t.type === TransactionType.INCOME) {
+        stat.totalIncome += amt;
+        stat.totalIncomeLAK += amt * rate;
+      } else if (t.type === TransactionType.EXPENSE) {
+        stat.totalExpense += amt;
+        stat.totalExpenseLAK += amt * rate;
+      }
+    }
+    const companySummary = Array.from(companyMap.values())
+      .map((c) => ({
+        ...c,
+        totalIncomeLAK: Math.round(c.totalIncomeLAK * 100) / 100,
+        totalExpenseLAK: Math.round(c.totalExpenseLAK * 100) / 100,
+        netCashflowLAK: Math.round((c.totalIncomeLAK - c.totalExpenseLAK) * 100) / 100,
+      }))
+      .sort((a, b) => b.totalExpenseLAK - a.totalExpenseLAK);
+
+    // Per-day per-company breakdown (LAK-equivalent)
+    const dayKey = (d: Date) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
+    type DayCompanyCell = {
+      incomeLAK: number;
+      expenseLAK: number;
+      netLAK: number;
+      txnCount: number;
+    };
+    const dailyByCompanyMap = new Map<string, Map<string, DayCompanyCell>>();
+    const companyKeysSeen = new Map<string, { companyId: string | null; code: string; name: string }>();
+
+    for (const t of txns) {
+      if (!acctIdx.has(t.bankAccountId)) continue;
+      const day = dayKey(t.transactionDate);
+      const coKey = t.company?.id ?? '__none__';
+      if (!companyKeysSeen.has(coKey)) {
+        companyKeysSeen.set(coKey, {
+          companyId: t.company?.id ?? null,
+          code: t.company?.code ?? '-',
+          name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
+        });
+      }
+      if (!dailyByCompanyMap.has(day)) dailyByCompanyMap.set(day, new Map());
+      const dayMap = dailyByCompanyMap.get(day)!;
+      const cell = dayMap.get(coKey) ?? { incomeLAK: 0, expenseLAK: 0, netLAK: 0, txnCount: 0 };
+      const amt = Number(t.amount);
+      const rate = rates[t.currency] ?? 1;
+      const amtLAK = amt * rate;
+      cell.txnCount += 1;
+      if (t.type === TransactionType.INCOME) {
+        cell.incomeLAK += amtLAK;
+        cell.netLAK += amtLAK;
+      } else if (t.type === TransactionType.EXPENSE) {
+        cell.expenseLAK += amtLAK;
+        cell.netLAK -= amtLAK;
+      }
+      dayMap.set(coKey, cell);
+    }
+
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const dailyByCompany = Array.from(dailyByCompanyMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, coMap]) => ({
+        date,
+        companies: Array.from(coMap.entries())
+          .map(([key, cell]) => {
+            const meta = companyKeysSeen.get(key)!;
+            return {
+              key,
+              companyId: meta.companyId,
+              code: meta.code,
+              name: meta.name,
+              incomeLAK: round2(cell.incomeLAK),
+              expenseLAK: round2(cell.expenseLAK),
+              netLAK: round2(cell.netLAK),
+              txnCount: cell.txnCount,
+            };
+          })
+          .sort((a, b) => b.expenseLAK - a.expenseLAK),
+      }));
+
     res.json({
       success: true,
       data: {
@@ -1065,6 +1377,8 @@ router.get(
         rates,
         rows,
         totals: { balance: [...balance] },
+        companySummary,
+        dailyByCompany,
       },
     });
   }),

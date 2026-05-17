@@ -12,6 +12,7 @@ import userRoutes from './user.routes';
 import settingsRoutes from './settings.routes';
 import notificationRoutes from './notification.routes';
 import exportRoutes from './export.routes';
+import nonFinancialItemRoutes from './nonFinancialItem.routes';
 
 const router = Router();
 
@@ -32,5 +33,6 @@ router.use('/users', userRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/export', exportRoutes);
+router.use('/non-financial-items', nonFinancialItemRoutes);
 
 export default router;

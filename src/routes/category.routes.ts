@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { UserRole } from '@prisma/client';
+import { UserRole, CategoryType } from '@prisma/client';
 import { prisma } from '../config/prisma';
 import { authenticate, authorize } from '../middleware/auth';
 import { asyncHandler } from '../utils/asyncHandler';
@@ -13,6 +13,7 @@ const upsertSchema = z.object({
   code: z.string().min(1),
   name: z.string().min(1),
   nameEn: z.string().optional().nullable(),
+  type: z.nativeEnum(CategoryType).optional(),
   icon: z.string().optional().nullable(),
   color: z.string().optional().nullable(),
   sortOrder: z.number().int().optional(),

@@ -328,6 +328,43 @@ function buildSheet1Daily(
       rates.LAK, rates.THB, rates.USD,
       checkPrev, checkIE, 0,
     ]);
+
+    // Per-company sub-rows for the day (LAK-equivalent).
+    type DayCompanyAgg = { code: string; name: string; incLAK: number; expLAK: number; cnt: number };
+    const dayCoMap = new Map<string, DayCompanyAgg>();
+    for (const t of list) {
+      if (!(t.currency in { LAK: 1, THB: 1, USD: 1 })) continue;
+      const key = t.company?.id ?? '__none__';
+      if (!dayCoMap.has(key)) {
+        dayCoMap.set(key, {
+          code: t.company?.code ?? '-',
+          name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
+          incLAK: 0,
+          expLAK: 0,
+          cnt: 0,
+        });
+      }
+      const entry = dayCoMap.get(key)!;
+      const amt = num(t.amount);
+      const rate = rates[t.currency] ?? 1;
+      entry.cnt += 1;
+      if (t.type === 'INCOME') entry.incLAK += amt * rate;
+      else if (t.type === 'EXPENSE') entry.expLAK += amt * rate;
+    }
+    const dayCoArr = Array.from(dayCoMap.values()).sort((a, b) => b.expLAK - a.expLAK);
+    for (const co of dayCoArr) {
+      const netLAK = co.incLAK - co.expLAK;
+      rows.push([
+        null,
+        `   └ ${co.code} — ${co.name}`,
+        r2(netLAK) || null, null, null,
+        null, null, null,
+        r2(co.incLAK) || null, null, null,
+        r2(co.expLAK) || null, null, null,
+        null, null, null,
+        null, null, null,
+      ]);
+    }
   });
 
   if (days.length === 0) {
@@ -357,12 +394,9 @@ function buildSheet1Daily(
   // Style header rows
   const totalCols = 20;
   styleRange(ws, 2, 0, 3, totalCols - 1, HEADER_STYLE);
-  // Style data rows
+  // Style data rows (data starts on row index 4; rows.length is the row count, last data row is rows.length - 1)
   const dataStart = 4;
-  const dataEnd = 3 + Math.max(days.length, 1);
   borderAllCells(ws, dataStart);
-  // Total row style
-  if (days.length > 1) styleRange(ws, dataEnd, 0, dataEnd, totalCols - 1, TOTAL_STYLE);
 
   ws['!cols'] = [
     { wch: 5 }, { wch: 13 }, { wch: 20 }, { wch: 18 }, { wch: 16 },
@@ -409,6 +443,7 @@ function buildSheet2Master(
   txns: TxnWithRels[],
   accounts: AccountColumn[],
   rates: Record<string, number>,
+  _companies?: { id: string; code: string; name: string }[],
 ): { ws: XLSX.WorkSheet; name: string } {
   const N = accounts.length || 1;
   const rows: Row[] = [];
@@ -470,6 +505,59 @@ function buildSheet2Master(
   for (let i = 0; i < N; i++) totalRow.push(r2(balance[i]) || null);
   rows.push(totalRow);
 
+  // ── Per-company summary block (appended below the master ledger) ──
+  const lastRowMaster = rows.length - 1;
+  rows.push([]);
+  rows.push(['ສະຫຼຸບແຍກຕາມບໍລິສັດ (ທຽບເທົ່າກີບ)']);
+  const coHdrRow = rows.length;
+  rows.push(['ບໍລິສັດ', 'ລາຍຮັບ (LAK)', 'ລາຍຈ່າຍ (LAK)', 'ກະແສເງິນສຸດທິ (LAK)', 'ລາຍການ']);
+
+  type CompanyAgg = {
+    code: string;
+    name: string;
+    incLAK: number;
+    expLAK: number;
+    cnt: number;
+  };
+  const coMap = new Map<string, CompanyAgg>();
+  for (const t of txns) {
+    if (!acctIdx.has(t.bankAccount.id)) continue;
+    const key = t.company?.id ?? '__none__';
+    if (!coMap.has(key)) {
+      coMap.set(key, {
+        code: t.company?.code ?? '-',
+        name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
+        incLAK: 0,
+        expLAK: 0,
+        cnt: 0,
+      });
+    }
+    const entry = coMap.get(key)!;
+    const amt = num(t.amount);
+    const rate = rates[t.currency] ?? 1;
+    entry.cnt += 1;
+    if (t.type === 'INCOME') entry.incLAK += amt * rate;
+    else if (t.type === 'EXPENSE') entry.expLAK += amt * rate;
+  }
+  const coArr = Array.from(coMap.values()).sort((a, b) => b.expLAK - a.expLAK);
+  for (const co of coArr) {
+    rows.push([
+      `${co.code} — ${co.name}`,
+      r2(co.incLAK) || null,
+      r2(co.expLAK) || null,
+      r2(co.incLAK - co.expLAK) || null,
+      co.cnt,
+    ]);
+  }
+  const coTotalRowIdx = rows.length;
+  rows.push([
+    'ລວມທັງໝົດ',
+    r2(coArr.reduce((s, c) => s + c.incLAK, 0)) || null,
+    r2(coArr.reduce((s, c) => s + c.expLAK, 0)) || null,
+    r2(coArr.reduce((s, c) => s + c.incLAK - c.expLAK, 0)) || null,
+    coArr.reduce((s, c) => s + c.cnt, 0),
+  ]);
+
   const ws = XLSX.utils.aoa_to_sheet(rows);
 
   // Merges for super-group headers (row 2)
@@ -486,9 +574,11 @@ function buildSheet2Master(
   styleRange(ws, 2, 0, 5, 3 + N * 3, HEADER_STYLE);
   // Style data rows with alternating borders
   borderAllCells(ws, 6);
-  // Total row
-  const lastRow = 6 + txns.filter((t) => acctIdx.has(t.bankAccount.id)).length;
-  styleRange(ws, lastRow, 0, lastRow, 3 + N * 3, TOTAL_STYLE);
+  // Master ledger total row
+  styleRange(ws, lastRowMaster, 0, lastRowMaster, 3 + N * 3, TOTAL_STYLE);
+  // Company summary header + total row
+  styleRange(ws, coHdrRow, 0, coHdrRow, 4, HEADER_STYLE);
+  styleRange(ws, coTotalRowIdx, 0, coTotalRowIdx, 4, TOTAL_STYLE);
 
   ws['!cols'] = [
     { wch: 5 }, { wch: 13 }, { wch: 36 }, { wch: 20 },
@@ -857,7 +947,7 @@ export const exportService = {
     const wb = XLSX.utils.book_new();
     const sheets = [
       buildSheet1Daily(txns, rates, filters),
-      buildSheet2Master(txns, acctCols, rates),
+      buildSheet2Master(txns, acctCols, rates, companies),
       buildSheet3DailyReport(txns, companies, rates, filters),
       buildSheet7Stuck(accounts, rates),
       buildSheet8Fund(txns, rates),

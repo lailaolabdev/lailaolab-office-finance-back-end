@@ -122,31 +122,24 @@ export const importService = {
       );
     }
 
-    const useCurrency = currency ?? (parsed.currency as Currency);
-    const exchange = await prisma.exchangeRate.findFirst({
-      where: {
-        AND: [
-          {
-            fromCurrency: useCurrency,
-          },
-          {
-            toCurrency: Currency.LAK,
-          },
-          // {
-          //   effectiveAt: {
-          //     lte: new Date(),
-          //   },
-          // },
-        ],
-      },
-      orderBy: {
-        effectiveAt: 'desc',
-      },
-    }); // single currency per account; multi-currency conversion deferred
-    if (!exchange) {
+    const useCurrency =
+      currency ?? ((parsed.currency as Currency | null) ?? (account.currency as Currency));
+    // For LAK → LAK we don't need a stored rate; it's trivially 1.
+    const exchange =
+      useCurrency === Currency.LAK
+        ? null
+        : await prisma.exchangeRate.findFirst({
+            where: {
+              fromCurrency: useCurrency,
+              toCurrency: Currency.LAK,
+            },
+            orderBy: { effectiveAt: 'desc' },
+          }); // single currency per account; multi-currency conversion deferred
+    if (useCurrency !== Currency.LAK && !exchange) {
       throw new BadRequestError(`ບໍມີອັດຕາແລກປ່ຽນໃນລະຫວ່າງ ສະກຸນເງິນ${useCurrency} ຫາ ສະກຸນເງິນ LAK`);
     }
-    const exchangeRate = exchange.rate;
+    const exchangeRate = exchange ? exchange.rate : new Prisma.Decimal(1);
+    const exchangeRateId = exchange?.id;
     // Dedupe within the batch itself (same date+amount+reference can repeat in source file)
     const seen = new Set<string>();
     const txnRecords: Prisma.TransactionCreateManyInput[] = [];
@@ -192,32 +185,34 @@ export const importService = {
       };
     }
 
-    // Validate category/subcategory IDs before transaction and fetch parent category IDs
-    const allSubCategoryIds = new Set<string>();
-    if (defaultCategoryId) allSubCategoryIds.add(defaultCategoryId);
+    // Resolve incoming IDs: each may be either a parent Category or a SubCategory.
+    // Frontend sends a parent ID when the user picks only the parent, or a sub ID
+    // when they drill down. Unknown IDs are silently dropped (treated as "none").
+    const allIds = new Set<string>();
+    if (defaultCategoryId) allIds.add(defaultCategoryId);
     if (rowCategories) {
-      Object.values(rowCategories).forEach(id => allSubCategoryIds.add(id));
+      Object.values(rowCategories).forEach((id) => allIds.add(id));
     }
 
-    // Map to store subcategory ID -> parent category ID
     const subCategoryToCategoryMap = new Map<string, string>();
+    const knownCategoryIds = new Set<string>();
 
-    if (allSubCategoryIds.size > 0) {
-      const existingSubCategories = await prisma.subCategory.findMany({
-        where: { id: { in: Array.from(allSubCategoryIds) } },
-        select: { id: true, categoryId: true }
-      });
-      const existingIds = new Set(existingSubCategories.map(sc => sc.id));
-      const invalidIds = Array.from(allSubCategoryIds).filter(id => !existingIds.has(id));
-      
-      if (invalidIds.length > 0) {
-        throw new BadRequestError(`Invalid subcategory IDs: ${invalidIds.join(', ')}`);
-      }
-
-      // Build mapping of subcategory ID to parent category ID
-      existingSubCategories.forEach(sc => {
-        subCategoryToCategoryMap.set(sc.id, sc.categoryId);
-      });
+    if (allIds.size > 0) {
+      const ids = Array.from(allIds);
+      const [existingSubCategories, existingCategories] = await Promise.all([
+        prisma.subCategory.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, categoryId: true },
+        }),
+        prisma.category.findMany({
+          where: { id: { in: ids } },
+          select: { id: true },
+        }),
+      ]);
+      existingSubCategories.forEach((sc) =>
+        subCategoryToCategoryMap.set(sc.id, sc.categoryId),
+      );
+      existingCategories.forEach((c) => knownCategoryIds.add(c.id));
     }
 
     // Real write — wrap in a serializable transaction
@@ -247,9 +242,20 @@ export const importService = {
             continue;
           }
           seen.add(key);
-          const subCategoryId =
+          const requestedId =
             (rowCategories && rowCategories[row.rowNumber]) || defaultCategoryId || null;
-          const categoryId = subCategoryId ? subCategoryToCategoryMap.get(subCategoryId) : null;
+          // ID may be a sub-category (drill-down) or a parent category (no sub picked).
+          // Unknown IDs are dropped so we don't violate FK constraints.
+          let categoryId: string | null = null;
+          let subCategoryId: string | null = null;
+          if (requestedId) {
+            if (subCategoryToCategoryMap.has(requestedId)) {
+              subCategoryId = requestedId;
+              categoryId = subCategoryToCategoryMap.get(requestedId)!;
+            } else if (knownCategoryIds.has(requestedId)) {
+              categoryId = requestedId;
+            }
+          }
 
           const total = new Prisma.Decimal(row.amount).mul(exchangeRate);
           txnRecords.push({
@@ -262,7 +268,7 @@ export const importService = {
             amount: row.amount,
             currency: useCurrency,
             exchangeRate,
-            exchangeRateId: exchange.id,
+            exchangeRateId,
             amountInBase: total.toString(),
             categoryId: categoryId || undefined,
             subCategoryId: subCategoryId || undefined,
