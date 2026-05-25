@@ -43,7 +43,13 @@ interface TxnWithRels {
 // Styling helpers — thin border on every data cell
 // ============================================================
 
+// Match the frontend font (Noto Sans Lao) so exported workbooks render
+// Lao text consistently in Excel/LibreOffice when the font is installed.
+const FONT_NAME = 'Noto Sans Lao';
+const BASE_FONT = { name: FONT_NAME };
+
 const THIN: CellStyle = {
+  font: { ...BASE_FONT },
   border: {
     top: { style: 'thin', color: { rgb: '000000' } },
     bottom: { style: 'thin', color: { rgb: '000000' } },
@@ -54,7 +60,7 @@ const THIN: CellStyle = {
 
 const HEADER_STYLE: CellStyle = {
   fill: { fgColor: { rgb: 'D9E1F2' }, patternType: 'solid' },
-  font: { bold: true },
+  font: { ...BASE_FONT, bold: true },
   alignment: { horizontal: 'center', wrapText: true },
   border: {
     top: { style: 'medium', color: { rgb: '4472C4' } },
@@ -66,7 +72,7 @@ const HEADER_STYLE: CellStyle = {
 
 const TOTAL_STYLE: CellStyle = {
   fill: { fgColor: { rgb: 'FFF2CC' }, patternType: 'solid' },
-  font: { bold: true },
+  font: { ...BASE_FONT, bold: true },
   border: {
     top: { style: 'medium', color: { rgb: 'F4B942' } },
     bottom: { style: 'medium', color: { rgb: 'F4B942' } },
@@ -74,6 +80,28 @@ const TOTAL_STYLE: CellStyle = {
     right: { style: 'thin', color: { rgb: 'AAAAAA' } },
   },
 };
+
+// Apply Noto Sans Lao to every populated cell that doesn't already have a font set.
+// Run after all per-range styles, so it fills in unstyled body cells without
+// overriding HEADER/TOTAL bold variants.
+function applyDefaultFont(ws: XLSX.WorkSheet) {
+  const ref = ws['!ref'];
+  if (!ref) return;
+  const range = XLSX.utils.decode_range(ref);
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = ws[addr];
+      if (!cell || cell.t === 'z') continue;
+      if (!cell.s) cell.s = {};
+      if (!cell.s.font) {
+        cell.s.font = { ...BASE_FONT };
+      } else if (!cell.s.font.name) {
+        cell.s.font.name = FONT_NAME;
+      }
+    }
+  }
+}
 
 
 // Apply a style object to every populated cell in the range [r1,r2] x [c1,c2]
@@ -957,6 +985,7 @@ export const exportService = {
 
     for (const s of sheets) {
       formatAllNumbers(s.ws);
+      applyDefaultFont(s.ws);
       XLSX.utils.book_append_sheet(wb, s.ws, s.name.slice(0, 31));
     }
 

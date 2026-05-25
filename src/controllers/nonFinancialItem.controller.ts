@@ -11,6 +11,7 @@ const baseSchema = z.object({
   amount: z.number().nonnegative(),
   currency: z.string().nullable().optional(),
   date: z.string().datetime(),
+  bankAccountId: z.string().min(1),
 });
 
 const createSchema = baseSchema;
@@ -36,6 +37,7 @@ export const nonFinancialItemController = {
       amount: parsed.amount,
       currency: parsed.currency ?? null,
       date: new Date(parsed.date),
+      bankAccountId: parsed.bankAccountId,
     });
     res.status(201).json({ success: true, data: item });
   },
