@@ -8,35 +8,23 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// ============================================================
-// USERS & AUTH
-// ============================================================
-
-enum UserRole {
-  ADMIN
-  MANAGER
-  ACCOUNTANT_LEAD
-  FINANCE_STAFF
-}
-
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  password     String
-  fullName     String
-  phone        String?
-  avatarUrl    String?
-  role         UserRole  @default(FINANCE_STAFF)
-  isActive     Boolean   @default(true)
-  lastLoginAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-
-  transactions     Transaction[]
-  approvedTxns     Transaction[]   @relation("ApprovedBy")
-  uploadedFiles    StatementFile[]
-  activityLogs     ActivityLog[]
-  notifications    Notification[]
+  id            String          @id @default(cuid())
+  email         String          @unique
+  password      String
+  fullName      String
+  phone         String?
+  avatarUrl     String?
+  role          UserRole        @default(FINANCE_STAFF)
+  isActive      Boolean         @default(true)
+  lastLoginAt   DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  activityLogs  ActivityLog[]
+  notifications Notification[]
+  uploadedFiles StatementFile[]
+  approvedTxns  Transaction[]   @relation("ApprovedBy")
+  transactions  Transaction[]
 
   @@map("users")
 }
@@ -52,32 +40,26 @@ model ActivityLog {
   ipAddress  String?
   userAgent  String?
   createdAt  DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([entityType, entityId])
   @@map("activity_logs")
 }
 
-// ============================================================
-// COMPANIES & BANK ACCOUNTS
-// ============================================================
-
 model Company {
-  id          String   @id @default(cuid())
-  code        String   @unique
-  name        String
-  nameEn      String?
-  taxId       String?
-  address     String?
-  phone       String?
-  email       String?
-  logoUrl     String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
+  id           String        @id @default(cuid())
+  code         String        @unique
+  name         String
+  nameEn       String?
+  taxId        String?
+  address      String?
+  phone        String?
+  email        String?
+  logoUrl      String?
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
   bankAccounts BankAccount[]
   transactions Transaction[]
 
@@ -85,80 +67,53 @@ model Company {
 }
 
 model Bank {
-  id        String   @id @default(cuid())
-  code      String   @unique // BCEL, JDB, LDB, IB, ACELIDA
-  name      String
-  nameEn    String?
-  logoUrl   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
+  id           String        @id @default(cuid())
+  code         String        @unique
+  name         String
+  nameEn       String?
+  logoUrl      String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
   bankAccounts BankAccount[]
 
   @@map("banks")
 }
 
-enum AccountType {
-  USABLE          // ບັນຊີໃຊ້ໄດ້
-  STUCK           // ບັນຊີຕິດ
-  COLLATERAL      // ບັນຊີຄ້ຳປະກັນ
-  FUND            // ບັນຊີກອງທຶນ
-}
-
-enum Currency {
-  LAK
-  THB
-  USD
-  CNY
-  VND
-}
-
 model BankAccount {
-  id             String      @id @default(cuid())
+  id             String          @id @default(cuid())
   companyId      String
   bankId         String
   accountNumber  String
   accountName    String
-  accountType    AccountType @default(USABLE)
-  currency       Currency    @default(LAK)
-  openingBalance Decimal     @default(0) @db.Decimal(20, 2)
-  currentBalance Decimal     @default(0) @db.Decimal(20, 2)
-  isActive       Boolean     @default(true)
+  accountType    AccountType     @default(USABLE)
+  currency       Currency        @default(LAK)
+  openingBalance Decimal         @default(0) @db.Decimal(20, 2)
+  currentBalance Decimal         @default(0) @db.Decimal(20, 2)
+  isActive       Boolean         @default(true)
   note           String?
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-
-  company         Company         @relation(fields: [companyId], references: [id])
-  bank            Bank            @relation(fields: [bankId], references: [id])
-  transactions    Transaction[]
-  statementFiles  StatementFile[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  bank           Bank            @relation(fields: [bankId], references: [id])
+  company        Company         @relation(fields: [companyId], references: [id])
+  statementFiles StatementFile[]
+  transactions   Transaction[]
 
   @@unique([companyId, bankId, accountNumber])
   @@map("bank_accounts")
 }
 
-// ============================================================
-// CATEGORIES
-// ============================================================
-
-enum CategoryType {
-  EXPENSE
-  INCOME
-}
-
 model Category {
-  id          String       @id @default(cuid())
-  code        String       @unique
-  name        String
-  nameEn      String?
-  type        CategoryType @default(EXPENSE)
-  icon        String?
-  color       String?
-  isActive    Boolean      @default(true)
-  sortOrder   Int          @default(0)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-
+  id            String        @id @default(cuid())
+  code          String        @unique
+  name          String
+  nameEn        String?
+  icon          String?
+  color         String?
+  isActive      Boolean       @default(true)
+  sortOrder     Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  type          CategoryType  @default(EXPENSE)
   subCategories SubCategory[]
   transactions  Transaction[]
 
@@ -167,18 +122,17 @@ model Category {
 }
 
 model SubCategory {
-  id         String   @id @default(cuid())
-  categoryId String
-  code       String   @unique
-  name       String
-  nameEn     String?
-  icon       String?
-  color      String?
-  isActive   Boolean  @default(true)
-  sortOrder  Int      @default(0)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
+  id           String        @id @default(cuid())
+  categoryId   String
+  code         String        @unique
+  name         String
+  nameEn       String?
+  icon         String?
+  color        String?
+  isActive     Boolean       @default(true)
+  sortOrder    Int           @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
   category     Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   transactions Transaction[]
 
@@ -186,106 +140,66 @@ model SubCategory {
   @@map("sub_categories")
 }
 
-// ============================================================
-// VENDORS & CUSTOMERS
-// ============================================================
-
-enum PartyType {
-  VENDOR
-  CUSTOMER
-  BOTH
-}
-
 model Party {
-  id        String    @id @default(cuid())
-  code      String    @unique
-  name      String
-  type      PartyType @default(VENDOR)
-  taxId     String?
-  phone     String?
-  email     String?
-  address   String?
-  note      String?
-  isActive  Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-
+  id           String        @id @default(cuid())
+  code         String        @unique
+  name         String
+  type         PartyType     @default(VENDOR)
+  taxId        String?
+  phone        String?
+  email        String?
+  address      String?
+  note         String?
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
   transactions Transaction[]
 
   @@map("parties")
 }
 
-// ============================================================
-// TRANSACTIONS
-// ============================================================
-
-enum TransactionType {
-  INCOME
-  EXPENSE
-  TRANSFER
-}
-
-enum TransactionStatus {
-  DRAFT
-  PENDING_APPROVAL
-  APPROVED
-  REJECTED
-  POSTED
-  VOIDED
-}
-
 model Transaction {
-  id              String            @id @default(cuid())
-  reference       String            @unique // Auto-generated
-  companyId       String
-  bankAccountId   String
-  type            TransactionType
-  status          TransactionStatus @default(POSTED)
-  transactionDate DateTime
-  amount          Decimal           @db.Decimal(20, 2)
-  currency        Currency          @default(LAK)
-  exchangeRate    Decimal           @default(1) @db.Decimal(20, 6)
-  exchangeRateId  String?
-  amountInBase    Decimal           @db.Decimal(20, 2) // amount * exchangeRate
-  categoryId      String?
-  subCategoryId   String?
-  partyId         String?
-  description     String
-  note            String?
-
-  // Duplicate detection fields
-  bankReference   String?
-  externalRef     String?
-
-  // Transfer specific
+  id                  String             @id @default(cuid())
+  reference           String             @unique
+  companyId           String
+  bankAccountId       String
+  type                TransactionType
+  status              TransactionStatus  @default(POSTED)
+  transactionDate     DateTime
+  amount              Decimal            @db.Decimal(20, 2)
+  currency            Currency           @default(LAK)
+  exchangeRate        Decimal            @default(1) @db.Decimal(20, 6)
+  exchangeRateId      String?
+  amountInBase        Decimal            @db.Decimal(20, 2)
+  categoryId          String?
+  subCategoryId       String?
+  partyId             String?
+  description         String
+  note                String?
+  bankReference       String?
+  externalRef         String?
   transferToAccountId String?
-
-  // Audit
-  createdById   String
-  approvedById  String?
-  approvedAt    DateTime?
-  postedAt      DateTime?
-  voidedAt      DateTime?
-  voidReason    String?
-
-  // Source
-  source        String?         // MANUAL, STATEMENT_IMPORT, API
-  statementFileId String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  company        Company        @relation(fields: [companyId], references: [id])
-  bankAccount    BankAccount    @relation(fields: [bankAccountId], references: [id])
-  exchangeRateRef ExchangeRate? @relation(fields: [exchangeRateId], references: [id])
-  category       Category?      @relation(fields: [categoryId], references: [id])
-  subCategory    SubCategory?   @relation(fields: [subCategoryId], references: [id])
-  party          Party?         @relation(fields: [partyId], references: [id])
-  createdBy      User           @relation(fields: [createdById], references: [id])
-  approvedBy     User?          @relation("ApprovedBy", fields: [approvedById], references: [id])
-  statementFile  StatementFile? @relation(fields: [statementFileId], references: [id])
-  attachments    Attachment[]
-  tags           TagOnTransaction[]
+  createdById         String
+  approvedById        String?
+  approvedAt          DateTime?
+  postedAt            DateTime?
+  voidedAt            DateTime?
+  voidReason          String?
+  source              String?
+  statementFileId     String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  attachments         Attachment[]
+  tags                TagOnTransaction[]
+  approvedBy          User?              @relation("ApprovedBy", fields: [approvedById], references: [id])
+  bankAccount         BankAccount        @relation(fields: [bankAccountId], references: [id])
+  category            Category?          @relation(fields: [categoryId], references: [id])
+  company             Company            @relation(fields: [companyId], references: [id])
+  createdBy           User               @relation(fields: [createdById], references: [id])
+  exchangeRateRef     ExchangeRate?      @relation(fields: [exchangeRateId], references: [id])
+  party               Party?             @relation(fields: [partyId], references: [id])
+  statementFile       StatementFile?     @relation(fields: [statementFileId], references: [id])
+  subCategory         SubCategory?       @relation(fields: [subCategoryId], references: [id])
 
   @@unique([bankAccountId, bankReference, transactionDate, amount], name: "uniq_bank_txn", map: "uniq_bank_txn")
   @@index([companyId, transactionDate])
@@ -298,11 +212,10 @@ model Transaction {
 }
 
 model Tag {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  color     String?
-  createdAt DateTime @default(now())
-
+  id           String             @id @default(cuid())
+  name         String             @unique
+  color        String?
+  createdAt    DateTime           @default(now())
   transactions TagOnTransaction[]
 
   @@map("tags")
@@ -311,24 +224,11 @@ model Tag {
 model TagOnTransaction {
   transactionId String
   tagId         String
-
-  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
-  tag         Tag         @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  tag           Tag         @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
 
   @@id([transactionId, tagId])
   @@map("tag_on_transactions")
-}
-
-// ============================================================
-// STATEMENT FILES & ATTACHMENTS
-// ============================================================
-
-enum StatementStatus {
-  UPLOADED
-  PARSING
-  PARSED
-  PROCESSED
-  FAILED
 }
 
 model StatementFile {
@@ -338,8 +238,8 @@ model StatementFile {
   filePath        String
   fileSize        Int
   mimeType        String
-  fileHash        String          // SHA256 of file bytes — file-level idempotency
-  bankTemplate    String?         // BCEL, JDB, LDB, IB, ACELIDA, GENERIC
+  fileHash        String
+  bankTemplate    String?
   status          StatementStatus @default(UPLOADED)
   periodStart     DateTime?
   periodEnd       DateTime?
@@ -350,10 +250,9 @@ model StatementFile {
   uploadedById    String
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
-
-  bankAccount  BankAccount   @relation(fields: [bankAccountId], references: [id])
-  uploadedBy   User          @relation(fields: [uploadedById], references: [id])
-  transactions Transaction[]
+  bankAccount     BankAccount     @relation(fields: [bankAccountId], references: [id])
+  uploadedBy      User            @relation(fields: [uploadedById], references: [id])
+  transactions    Transaction[]
 
   @@unique([bankAccountId, fileHash])
   @@index([fileHash])
@@ -361,30 +260,16 @@ model StatementFile {
 }
 
 model Attachment {
-  id            String   @id @default(cuid())
+  id            String      @id @default(cuid())
   transactionId String
   fileName      String
   filePath      String
   fileSize      Int
   mimeType      String
-  createdAt     DateTime @default(now())
-
-  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
 
   @@map("attachments")
-}
-
-// ============================================================
-// NOTIFICATIONS
-// ============================================================
-
-enum NotificationType {
-  INFO
-  WARNING
-  ERROR
-  APPROVAL_REQUEST
-  LOW_BALANCE
-  DAILY_REMINDER
 }
 
 model Notification {
@@ -396,16 +281,11 @@ model Notification {
   link      String?
   isRead    Boolean          @default(false)
   createdAt DateTime         @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, isRead])
   @@map("notifications")
 }
-
-// ============================================================
-// SETTINGS
-// ============================================================
 
 model Setting {
   id        String   @id @default(cuid())
@@ -424,32 +304,92 @@ model ExchangeRate {
   rate         Decimal       @db.Decimal(20, 6)
   effectiveAt  DateTime
   createdAt    DateTime      @default(now())
-
   transactions Transaction[]
 
   @@unique([fromCurrency, toCurrency, effectiveAt])
   @@map("exchange_rates")
 }
 
-// ============================================================
-// NON-FINANCIAL ITEMS (ຊັບສິນທີ່ຫັກໄວ້ / ຊັບສິນທີ່ໃຊ້ບໍ່ໄດ້)
-// ============================================================
-
-enum NonFinancialItemType {
-  WITHHELD   // ຊັບສິນທີ່ຫັກໄວ້
-  UNUSABLE   // ຊັບສິນທີ່ໃຊ້ບໍ່ໄດ້
-}
-
 model NonFinancialItem {
   id          String               @id @default(cuid())
   type        NonFinancialItemType
   description String
-  amount      Decimal              @db.Decimal(20, 2)
-  currency    String?
   date        DateTime
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
+  amount      Decimal              @db.Decimal(20, 2)
+  currency    String?
 
   @@index([type])
   @@map("non_financial_items")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  ACCOUNTANT_LEAD
+  FINANCE_STAFF
+}
+
+enum AccountType {
+  USABLE
+  STUCK
+  COLLATERAL
+  FUND
+}
+
+enum Currency {
+  LAK
+  THB
+  USD
+  CNY
+  VND
+}
+
+enum CategoryType {
+  EXPENSE
+  INCOME
+}
+
+enum PartyType {
+  VENDOR
+  CUSTOMER
+  BOTH
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+}
+
+enum TransactionStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  POSTED
+  VOIDED
+}
+
+enum StatementStatus {
+  UPLOADED
+  PARSING
+  PARSED
+  PROCESSED
+  FAILED
+}
+
+enum NotificationType {
+  INFO
+  WARNING
+  ERROR
+  APPROVAL_REQUEST
+  LOW_BALANCE
+  DAILY_REMINDER
+}
+
+enum NonFinancialItemType {
+  WITHHELD
+  UNUSABLE
 }

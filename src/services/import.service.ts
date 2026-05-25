@@ -215,6 +215,48 @@ export const importService = {
       existingCategories.forEach((c) => knownCategoryIds.add(c.id));
     }
 
+    // Insufficient-funds pre-check: if the imported file's net cashflow would
+    // drive the account below zero, refuse the entire batch up-front so we
+    // don't have to roll back inside the transaction. Compute net = SUM(INCOME)
+    // - SUM(EXPENSE) for the rows we're about to import; the account balance
+    // is recomputed deterministically below, so what matters is the final
+    // balance (opening + all posted txns + net of this batch).
+    {
+      const [postedIncome, postedExpense] = await Promise.all([
+        prisma.transaction.aggregate({
+          where: { bankAccountId, status: 'POSTED', type: 'INCOME' },
+          _sum: { amount: true },
+        }),
+        prisma.transaction.aggregate({
+          where: { bankAccountId, status: 'POSTED', type: 'EXPENSE' },
+          _sum: { amount: true },
+        }),
+      ]);
+      let net = 0;
+      const seenForCheck = new Set<string>();
+      for (const row of activeRows) {
+        const key = `${row.transactionDate.toISOString()}|${row.amount}|${row.bankReference ?? ''}`;
+        if (seenForCheck.has(key)) continue;
+        seenForCheck.add(key);
+        net += row.type === 'INCOME' ? row.amount : -row.amount;
+      }
+      const projected =
+        Number(account.openingBalance) +
+        Number(postedIncome._sum.amount ?? 0) -
+        Number(postedExpense._sum.amount ?? 0) +
+        net;
+      if (projected < 0) {
+        throw new BadRequestError(
+          `ການນຳເຂົ້ານີ້ຈະເຮັດໃຫ້ຍອດເງິນຕິດລົບ — ຍອດສຸດທິຫຼັງນຳເຂົ້າ ${projected.toLocaleString()} ${useCurrency}. ກະລຸນາກວດສອບລາຍການໃນໄຟລ໌ກ່ອນ.`,
+          {
+            bankAccountId,
+            projectedBalance: projected,
+            currency: useCurrency,
+          },
+        );
+      }
+    }
+
     // Real write — wrap in a serializable transaction
     const result = await prisma.$transaction(
       async (tx) => {
@@ -302,6 +344,16 @@ export const importService = {
           Number(account.openingBalance) +
           Number(income._sum.amountInBase ?? 0) -
           Number(expense._sum.amountInBase ?? 0);
+
+        // Final safety net — refuse to commit if posted totals push the account
+        // below zero. This complements the pre-check above for race conditions
+        // (concurrent imports/transactions hitting the same account).
+        if (balance < 0) {
+          throw new BadRequestError(
+            `ການນຳເຂົ້ານີ້ຈະເຮັດໃຫ້ຍອດເງິນຕິດລົບ — ຍອດສຸດທິ ${balance.toLocaleString()} ${useCurrency}`,
+            { bankAccountId, projectedBalance: balance, currency: useCurrency },
+          );
+        }
 
         await tx.bankAccount.update({
           where: { id: bankAccountId },

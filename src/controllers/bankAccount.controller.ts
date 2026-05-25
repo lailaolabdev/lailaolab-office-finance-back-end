@@ -31,6 +31,13 @@ export const bankAccountController = {
     });
     res.json({ success: true, data: accounts });
   },
+  async balanceSummary(req: Request, res: Response) {
+    const { companyId } = req.query;
+    const summary = await bankAccountService.balanceSummary({
+      companyId: companyId as string | undefined,
+    });
+    res.json({ success: true, data: summary });
+  },
   async get(req: Request, res: Response) {
     const account = await bankAccountService.getById(req.params.id);
     res.json({ success: true, data: account });

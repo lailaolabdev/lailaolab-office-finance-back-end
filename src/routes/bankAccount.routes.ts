@@ -9,6 +9,7 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/', asyncHandler(bankAccountController.list));
+router.get('/balance-summary', asyncHandler(bankAccountController.balanceSummary));
 router.get('/:id', asyncHandler(bankAccountController.get));
 router.post('/', authorize(UserRole.ADMIN, UserRole.MANAGER, UserRole.ACCOUNTANT_LEAD), asyncHandler(bankAccountController.create));
 router.patch('/:id', authorize(UserRole.ADMIN, UserRole.MANAGER, UserRole.ACCOUNTANT_LEAD), asyncHandler(bankAccountController.update));

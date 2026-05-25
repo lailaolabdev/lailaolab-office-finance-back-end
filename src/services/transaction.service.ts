@@ -1,8 +1,39 @@
 import { Prisma, TransactionStatus, TransactionType, Currency } from '@prisma/client';
 import { prisma } from '../config/prisma';
-import { ConflictError, NotFoundError } from '../utils/errors';
+import { BadRequestError, ConflictError, NotFoundError } from '../utils/errors';
 import { notificationService } from './notification.service';
 import { settingsService } from './settings.service';
+
+// Insufficient-funds guard: ensure the bank account holds enough to cover an
+// outgoing transaction (EXPENSE, or TRANSFER on the source side). INCOME
+// transactions never overdraw and skip this check.
+async function assertSufficientBalance(
+  tx: Prisma.TransactionClient,
+  bankAccountId: string,
+  amount: number,
+  type: TransactionType,
+) {
+  if (type === 'INCOME') return;
+  const acct = await tx.bankAccount.findUnique({
+    where: { id: bankAccountId },
+    select: { id: true, currentBalance: true, accountNumber: true, currency: true },
+  });
+  if (!acct) throw new BadRequestError('ບໍ່ພົບບັນຊີທະນາຄານ');
+  const balance = Number(acct.currentBalance);
+  if (balance < amount) {
+    throw new BadRequestError(
+      `ຍອດເງິນໃນບັນຊີບໍ່ພໍ — ຍອດປັດຈຸບັນ ${balance.toLocaleString()} ${acct.currency}, ຕ້ອງການ ${amount.toLocaleString()} ${acct.currency}`,
+      {
+        bankAccountId: acct.id,
+        accountNumber: acct.accountNumber,
+        currency: acct.currency,
+        currentBalance: balance,
+        requiredAmount: amount,
+        shortfall: amount - balance,
+      },
+    );
+  }
+}
 
 async function getApprovalLimit(currency: Currency): Promise<number> {
   const key = `approval.limit${currency}`;
@@ -187,6 +218,13 @@ export const transactionService = {
     const needsApproval = input.amount > limit && input.type !== 'INCOME';
 
     const created = await prisma.$transaction(async (tx) => {
+      // Guard outgoing transactions against overdrawing the source account.
+      // Only enforced on the path that actually moves money (i.e. it will be
+      // posted now). PENDING_APPROVAL is checked again at approve-time.
+      if (!needsApproval) {
+        await assertSufficientBalance(tx, input.bankAccountId, input.amount, input.type);
+      }
+
       const txn = await tx.transaction.create({
         data: {
           reference,
@@ -260,6 +298,15 @@ export const transactionService = {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      // Re-check balance at approve-time — funds may have moved since the
+      // request was filed.
+      await assertSufficientBalance(
+        tx,
+        existing.bankAccountId,
+        Number(existing.amount),
+        existing.type,
+      );
+
       const approved = await tx.transaction.update({
         where: { id },
         data: {
@@ -394,6 +441,28 @@ export const transactionService = {
         const oldSigned = existing.type === 'INCOME' ? Number(existing.amount) : -Number(existing.amount);
         const newSigned = existing.type === 'INCOME' ? newAmount : -newAmount;
         const delta = newSigned - oldSigned;
+
+        // If the edit makes the account go below zero, block it. delta<0 means
+        // the change reduces the balance (e.g. increasing an EXPENSE amount or
+        // decreasing an INCOME amount).
+        if (delta < 0 && existing.status === 'POSTED') {
+          const acct = await tx.bankAccount.findUnique({
+            where: { id: existing.bankAccountId },
+            select: { currentBalance: true, accountNumber: true, currency: true },
+          });
+          const balance = Number(acct?.currentBalance ?? 0);
+          if (balance + delta < 0) {
+            throw new BadRequestError(
+              `ການແກ້ໄຂນີ້ຈະເຮັດໃຫ້ຍອດເງິນຕິດລົບ — ຍອດປັດຈຸບັນ ${balance.toLocaleString()} ${acct?.currency ?? ''}, ຍອດຫຼັງແກ້ໄຂ ${(balance + delta).toLocaleString()}`,
+              {
+                bankAccountId: existing.bankAccountId,
+                currentBalance: balance,
+                projectedBalance: balance + delta,
+              },
+            );
+          }
+        }
+
         await tx.bankAccount.update({
           where: { id: existing.bankAccountId },
           data: { currentBalance: { increment: delta } },

@@ -8,6 +8,9 @@ CREATE TYPE "AccountType" AS ENUM ('USABLE', 'STUCK', 'COLLATERAL', 'FUND');
 CREATE TYPE "Currency" AS ENUM ('LAK', 'THB', 'USD', 'CNY', 'VND');
 
 -- CreateEnum
+CREATE TYPE "CategoryType" AS ENUM ('EXPENSE', 'INCOME');
+
+-- CreateEnum
 CREATE TYPE "PartyType" AS ENUM ('VENDOR', 'CUSTOMER', 'BOTH');
 
 -- CreateEnum
@@ -21,6 +24,9 @@ CREATE TYPE "StatementStatus" AS ENUM ('UPLOADED', 'PARSING', 'PARSED', 'PROCESS
 
 -- CreateEnum
 CREATE TYPE "NotificationType" AS ENUM ('INFO', 'WARNING', 'ERROR', 'APPROVAL_REQUEST', 'LOW_BALANCE', 'DAILY_REMINDER');
+
+-- CreateEnum
+CREATE TYPE "NonFinancialItemType" AS ENUM ('WITHHELD', 'UNUSABLE');
 
 -- CreateTable
 CREATE TABLE "users" (
@@ -117,6 +123,7 @@ CREATE TABLE "categories" (
     "sortOrder" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "type" "CategoryType" NOT NULL DEFAULT 'EXPENSE',
 
     CONSTRAINT "categories_pkey" PRIMARY KEY ("id")
 );
@@ -284,6 +291,20 @@ CREATE TABLE "exchange_rates" (
     CONSTRAINT "exchange_rates_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "non_financial_items" (
+    "id" TEXT NOT NULL,
+    "type" "NonFinancialItemType" NOT NULL,
+    "description" TEXT NOT NULL,
+    "date" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "amount" DECIMAL(20,2) NOT NULL,
+    "currency" TEXT,
+
+    CONSTRAINT "non_financial_items_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
 
@@ -304,6 +325,9 @@ CREATE UNIQUE INDEX "bank_accounts_companyId_bankId_accountNumber_key" ON "bank_
 
 -- CreateIndex
 CREATE UNIQUE INDEX "categories_code_key" ON "categories"("code");
+
+-- CreateIndex
+CREATE INDEX "categories_type_idx" ON "categories"("type");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "sub_categories_code_key" ON "sub_categories"("code");
@@ -356,50 +380,53 @@ CREATE UNIQUE INDEX "settings_key_key" ON "settings"("key");
 -- CreateIndex
 CREATE UNIQUE INDEX "exchange_rates_fromCurrency_toCurrency_effectiveAt_key" ON "exchange_rates"("fromCurrency", "toCurrency", "effectiveAt");
 
--- AddForeignKey
-ALTER TABLE "activity_logs" ADD CONSTRAINT "activity_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- CreateIndex
+CREATE INDEX "non_financial_items_type_idx" ON "non_financial_items"("type");
 
 -- AddForeignKey
-ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "activity_logs" ADD CONSTRAINT "activity_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_bankId_fkey" FOREIGN KEY ("bankId") REFERENCES "banks"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "bank_accounts" ADD CONSTRAINT "bank_accounts_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "sub_categories" ADD CONSTRAINT "sub_categories_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "categories"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_bankAccountId_fkey" FOREIGN KEY ("bankAccountId") REFERENCES "bank_accounts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_exchangeRateId_fkey" FOREIGN KEY ("exchangeRateId") REFERENCES "exchange_rates"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "categories"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_subCategoryId_fkey" FOREIGN KEY ("subCategoryId") REFERENCES "sub_categories"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_partyId_fkey" FOREIGN KEY ("partyId") REFERENCES "parties"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "transactions" ADD CONSTRAINT "transactions_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "transactions" ADD CONSTRAINT "transactions_approvedById_fkey" FOREIGN KEY ("approvedById") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_bankAccountId_fkey" FOREIGN KEY ("bankAccountId") REFERENCES "bank_accounts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "categories"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_exchangeRateId_fkey" FOREIGN KEY ("exchangeRateId") REFERENCES "exchange_rates"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_partyId_fkey" FOREIGN KEY ("partyId") REFERENCES "parties"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "transactions" ADD CONSTRAINT "transactions_statementFileId_fkey" FOREIGN KEY ("statementFileId") REFERENCES "statement_files"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "tag_on_transactions" ADD CONSTRAINT "tag_on_transactions_transactionId_fkey" FOREIGN KEY ("transactionId") REFERENCES "transactions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_subCategoryId_fkey" FOREIGN KEY ("subCategoryId") REFERENCES "sub_categories"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "tag_on_transactions" ADD CONSTRAINT "tag_on_transactions_tagId_fkey" FOREIGN KEY ("tagId") REFERENCES "tags"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "tag_on_transactions" ADD CONSTRAINT "tag_on_transactions_transactionId_fkey" FOREIGN KEY ("transactionId") REFERENCES "transactions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "statement_files" ADD CONSTRAINT "statement_files_bankAccountId_fkey" FOREIGN KEY ("bankAccountId") REFERENCES "bank_accounts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
