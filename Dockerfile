@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-alpine AS base
-RUN corepack enable
+FROM node:22-slim AS base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && corepack enable
 WORKDIR /app
 
 # ---- Build (installs all deps, generates Prisma client, compiles TS) ----
@@ -14,8 +17,10 @@ COPY . .
 RUN pnpm prisma generate && pnpm build
 
 # ---- Runtime ----
-FROM node:22-alpine AS runtime
-RUN apk add --no-cache tini
+FROM node:22-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=4000
@@ -26,10 +31,9 @@ COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./
 
 RUN mkdir -p /app/uploads /app/logs \
- && addgroup -S app && adduser -S app -G app \
- && chown -R app:app /app
-USER app
+ && chown -R node:node /app
+USER node
 
 EXPOSE 4000
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]
