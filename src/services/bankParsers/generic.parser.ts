@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { BankParser, ParsedRow, ParsedStatement } from './types';
-import { cellStr, parseAmount, parseDateCell } from './utils';
+import { cellStr, extractCurrencyFromColumn, extractCurrencyFromMetaRows, parseAmount, parseDateCell } from './utils';
 
 /**
  * Generic fallback parser. Used when no bank-specific format matches —
@@ -29,7 +29,7 @@ export const genericParser: BankParser = {
 
     if (rows.length < 2) {
       warnings.push('ໄຟລ໌ບໍ່ມີຂໍ້ມູນ');
-      return empty(warnings);
+      return empty(warnings, extractCurrencyFromMetaRows(rows));
     }
 
     const header = (rows[0] ?? []).map((c) => cellStr(c));
@@ -46,10 +46,14 @@ export const genericParser: BankParser = {
     const colType = find('type', 'ປະເພດ', 'ประเภท');
     const colRef = find('reference', 'ref', 'ອ້າງອີງ', 'bank ref');
     const colNote = find('note', 'remark', 'ໝາຍເຫດ', 'หมายเหตุ');
+    const colCurrency = find('currency', 'ສະກຸນ', 'สกุล');
+
+    const currency =
+      extractCurrencyFromMetaRows(rows) ?? extractCurrencyFromColumn(rows, colCurrency);
 
     if (colDate === -1) {
       warnings.push('ບໍ່ພົບ column ວັນທີ');
-      return empty(warnings);
+      return empty(warnings, currency);
     }
 
     const useDebitCredit = colDebit >= 0 && colCredit >= 0;
@@ -102,7 +106,7 @@ export const genericParser: BankParser = {
       template: 'GENERIC',
       bankCode: null,
       accountNumber: null,
-      currency: null,
+      currency,
       periodStart: out.length ? out[0].transactionDate : null,
       periodEnd: out.length ? out[out.length - 1].transactionDate : null,
       openingBalance: null,
@@ -113,12 +117,15 @@ export const genericParser: BankParser = {
   },
 };
 
-function empty(warnings: string[]): ParsedStatement {
+function empty(
+  warnings: string[],
+  currency: ParsedStatement['currency'] = null,
+): ParsedStatement {
   return {
     template: 'GENERIC',
     bankCode: null,
     accountNumber: null,
-    currency: null,
+    currency,
     periodStart: null,
     periodEnd: null,
     openingBalance: null,

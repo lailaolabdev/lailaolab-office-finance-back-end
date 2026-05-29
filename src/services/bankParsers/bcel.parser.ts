@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
+import { Currency } from '@prisma/client';
 import { BankParser, ParsedRow, ParsedStatement } from './types';
-import { cellStr, findRowIndex, parseAmount, parseDateCell } from './utils';
+import { cellStr, extractCurrencyFromMetaRows, findRowIndex, parseAmount, parseDateCell } from './utils';
 
 /**
  * BCEL Statement Format
@@ -128,7 +129,7 @@ export const bcelParser: BankParser = {
 
 interface BcelMeta {
   accountNumber: string | null;
-  currency: string | null;
+  currency: Currency | null;
   periodStart: Date | null;
   periodEnd: Date | null;
   openingBalance: number | null;
@@ -136,25 +137,18 @@ interface BcelMeta {
 
 function extractBcelMeta(rows: unknown[][]): BcelMeta {
   let accountNumber: string | null = null;
-  let currency: string | null = null;
   let periodStart: Date | null = null;
   let periodEnd: Date | null = null;
   let openingBalance: number | null = null;
 
-  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+  const metaRowLimit = Math.min(rows.length, 15);
+
+  for (let i = 0; i < metaRowLimit; i++) {
     const row = rows[i] ?? [];
     for (let j = 0; j < row.length; j++) {
       const c = cellStr(row[j]);
       if (c.startsWith('ເລກບັນຊີ')) {
         accountNumber = cellStr(row[j + 1]) || accountNumber;
-      }
-      if (c.startsWith('ສະກຸນເງີນ') || c.startsWith('ສະກຸນເງິນ')) {
-        const v = cellStr(row[j + 1]);
-        if (v.includes('ກີບ') || v.toUpperCase().includes('LAK')) currency = 'LAK';
-        else if (v.toUpperCase().includes('USD')) currency = 'USD';
-        else if (v.toUpperCase().includes('THB')) currency = 'THB';
-        else if (v.toUpperCase().includes('CNY')) currency = 'CNY';
-        else if (v.toUpperCase().includes('VND')) currency = 'VND';
       }
       if (c.startsWith('ແຕ່ວັນທີ')) {
         const m = c.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
@@ -168,6 +162,8 @@ function extractBcelMeta(rows: unknown[][]): BcelMeta {
       }
     }
   }
+
+  const currency = extractCurrencyFromMetaRows(rows);
 
   return { accountNumber, currency, periodStart, periodEnd, openingBalance };
 }

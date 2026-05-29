@@ -1,3 +1,6 @@
+import { Currency } from '@prisma/client';
+import { normalizeCurrency } from '../../utils/currency';
+
 export function parseAmount(val: unknown): number {
   if (val === null || val === undefined || val === '') return 0;
   if (typeof val === 'number') return val;
@@ -71,4 +74,80 @@ export function findRowIndex(
     if (predicate(rows[i] ?? [])) return i;
   }
   return -1;
+}
+
+const CURRENCY_LABEL_INLINE = /^(?:ສະກຸນເງ[ີິ]ນ|currency)\s*[:：]?\s*/iu;
+
+function isCurrencyLabel(cell: string): boolean {
+  return (
+    cell.startsWith('ສະກຸນເງີນ') ||
+    cell.startsWith('ສະກຸນເງິນ') ||
+    /^currency\s*:/i.test(cell)
+  );
+}
+
+function currencyFromLabelCell(cell: string, adjacent: string): Currency | null {
+  const inline = cell.replace(CURRENCY_LABEL_INLINE, '');
+  return normalizeCurrency(adjacent) ?? normalizeCurrency(inline);
+}
+
+/**
+ * Extract currency from statement metadata rows (headers before the transaction table).
+ * Supports English codes (USD), Lao labels (ໂດລາ, ກີບ), and "Currency : …" patterns.
+ */
+export function extractCurrencyFromMetaRows(
+  rows: unknown[][],
+  options?: { maxRows?: number },
+): Currency | null {
+  const limit = Math.min(rows.length, options?.maxRows ?? 15);
+  let currency: Currency | null = null;
+
+  for (let i = 0; i < limit; i++) {
+    const row = rows[i] ?? [];
+    for (let j = 0; j < row.length; j++) {
+      const c = cellStr(row[j]);
+      if (isCurrencyLabel(c)) {
+        currency = currencyFromLabelCell(c, cellStr(row[j + 1])) ?? currency;
+      }
+    }
+  }
+
+  if (!currency) {
+    const blob = rows
+      .slice(0, limit)
+      .flat()
+      .map((c) => cellStr(c))
+      .join(' ');
+    const curMatch = blob.match(/Currency\s*:\s*([^\s,|]+)/i);
+    if (curMatch) currency = normalizeCurrency(curMatch[1]);
+  }
+
+  if (!currency) {
+    for (let i = 0; i < limit; i++) {
+      for (const cell of rows[i] ?? []) {
+        const normalized = normalizeCurrency(cellStr(cell));
+        if (normalized) {
+          currency = normalized;
+          break;
+        }
+      }
+      if (currency) break;
+    }
+  }
+
+  return currency;
+}
+
+/** Read currency from a dedicated column (e.g. "ສະກຸນ" in export files). */
+export function extractCurrencyFromColumn(
+  rows: unknown[][],
+  colIndex: number,
+  startRow = 1,
+): Currency | null {
+  if (colIndex < 0) return null;
+  for (let i = startRow; i < rows.length; i++) {
+    const normalized = normalizeCurrency(cellStr(rows[i]?.[colIndex]));
+    if (normalized) return normalized;
+  }
+  return null;
 }

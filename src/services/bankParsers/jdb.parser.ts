@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { BankParser, ParsedRow, ParsedStatement } from './types';
-import { cellStr, findRowIndex, parseAmount, parseDateCell } from './utils';
+import { cellStr, extractCurrencyFromMetaRows, findRowIndex, parseAmount, parseDateCell } from './utils';
 
 /**
  * JDB Statement Format
@@ -30,13 +30,14 @@ export const jdbParser: BankParser = {
     });
 
     const warnings: string[] = [];
+    const currency = extractCurrencyFromMetaRows(rows);
     const headerIdx = findRowIndex(rows, (row) => {
       const cells = row.map((c) => cellStr(c));
       return cells.includes('ວັນທີເຮັດທຸລະກຳ') && cells.includes('ຍອດເດບິດ');
     });
     if (headerIdx === -1) {
       warnings.push('JDB: ບໍ່ພົບ header row');
-      return empty('JDB', warnings);
+      return empty('JDB', warnings, currency);
     }
 
     const header = (rows[headerIdx] ?? []).map((c) => cellStr(c));
@@ -74,7 +75,7 @@ export const jdbParser: BankParser = {
       template: 'JDB',
       bankCode: 'JDB',
       accountNumber: null,
-      currency: null,
+      currency,
       periodStart: out.length ? out[0].transactionDate : null,
       periodEnd: out.length ? out[out.length - 1].transactionDate : null,
       openingBalance: null,
@@ -85,12 +86,16 @@ export const jdbParser: BankParser = {
   },
 };
 
-function empty(template: 'JDB', warnings: string[]): ParsedStatement {
+function empty(
+  template: 'JDB',
+  warnings: string[],
+  currency: ParsedStatement['currency'] = null,
+): ParsedStatement {
   return {
     template,
     bankCode: 'JDB',
     accountNumber: null,
-    currency: null,
+    currency,
     periodStart: null,
     periodEnd: null,
     openingBalance: null,

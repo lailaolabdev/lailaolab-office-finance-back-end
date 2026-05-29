@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { BankParser, ParsedRow, ParsedStatement } from './types';
-import { cellStr, findRowIndex, parseAmount, parseDateCell } from './utils';
+import { cellStr, extractCurrencyFromMetaRows, findRowIndex, parseAmount, parseDateCell } from './utils';
 
 /**
  * IB (Industrial Bank) — Online Statement Format
@@ -35,13 +35,14 @@ export const ibParser: BankParser = {
     });
 
     const warnings: string[] = [];
+    const currency = extractCurrencyFromMetaRows(rows);
     const headerIdx = findRowIndex(rows, (row) => {
       const cells = row.map((c) => cellStr(c));
       return cells.includes('Bank Date') && cells.includes('Debit') && cells.includes('Credit');
     });
     if (headerIdx === -1) {
       warnings.push('IB: ບໍ່ພົບ header row');
-      return empty(warnings);
+      return empty(warnings, currency);
     }
 
     const header = (rows[headerIdx] ?? []).map((c) => cellStr(c));
@@ -83,7 +84,7 @@ export const ibParser: BankParser = {
       template: 'IB',
       bankCode: 'IB',
       accountNumber: null,
-      currency: null,
+      currency,
       periodStart: out.length ? out[0].transactionDate : null,
       periodEnd: out.length ? out[out.length - 1].transactionDate : null,
       openingBalance: null,
@@ -94,12 +95,15 @@ export const ibParser: BankParser = {
   },
 };
 
-function empty(warnings: string[]): ParsedStatement {
+function empty(
+  warnings: string[],
+  currency: ParsedStatement['currency'] = null,
+): ParsedStatement {
   return {
     template: 'IB',
     bankCode: 'IB',
     accountNumber: null,
-    currency: null,
+    currency,
     periodStart: null,
     periodEnd: null,
     openingBalance: null,

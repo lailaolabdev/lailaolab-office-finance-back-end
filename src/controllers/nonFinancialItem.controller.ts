@@ -24,6 +24,12 @@ export const nonFinancialItemController = {
     res.json({ success: true, data: items });
   },
 
+  async summary(req: Request, res: Response) {
+    const type = req.query.type as NonFinancialItemType | undefined;
+    const summary = await nonFinancialItemService.getSummary(type);
+    res.json({ success: true, data: summary });
+  },
+
   async get(req: Request, res: Response) {
     const item = await nonFinancialItemService.getById(req.params.id);
     res.json({ success: true, data: item });

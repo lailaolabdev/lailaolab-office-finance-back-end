@@ -1,3 +1,5 @@
+import { Currency } from '@prisma/client';
+
 export type BankTemplate = 'BCEL' | 'JDB' | 'LDB' | 'IB' | 'ACELIDA' | 'GENERIC';
 
 export interface ParsedRow {
@@ -15,7 +17,7 @@ export interface ParsedStatement {
   template: BankTemplate;
   bankCode: string | null;
   accountNumber: string | null;
-  currency: string | null;
+  currency: Currency | null;
   periodStart: Date | null;
   periodEnd: Date | null;
   openingBalance: number | null;

@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { BankParser, ParsedRow, ParsedStatement } from './types';
-import { cellStr, findRowIndex, parseAmount, parseDateCell } from './utils';
+import { cellStr, extractCurrencyFromMetaRows, findRowIndex, parseAmount, parseDateCell } from './utils';
 
 /**
  * ACELIDA Statement Format (best-effort heuristic).
@@ -30,6 +30,7 @@ export const acelidaParser: BankParser = {
     });
 
     const warnings: string[] = ['ACELIDA: ໃຊ້ heuristic parser — ກວດສອບຂໍ້ມູນກ່ອນບັນທຶກ'];
+    const currency = extractCurrencyFromMetaRows(rows);
     const headerIdx = findRowIndex(rows, (row) => {
       const cells = row.map((c) => cellStr(c).toLowerCase());
       return (
@@ -40,7 +41,7 @@ export const acelidaParser: BankParser = {
     });
     if (headerIdx === -1) {
       warnings.push('ACELIDA: ບໍ່ພົບ header row');
-      return empty(warnings);
+      return empty(warnings, currency);
     }
 
     const header = (rows[headerIdx] ?? []).map((c) => cellStr(c));
@@ -78,7 +79,7 @@ export const acelidaParser: BankParser = {
       template: 'ACELIDA',
       bankCode: 'ACELIDA',
       accountNumber: null,
-      currency: null,
+      currency,
       periodStart: out.length ? out[0].transactionDate : null,
       periodEnd: out.length ? out[out.length - 1].transactionDate : null,
       openingBalance: null,
@@ -89,12 +90,15 @@ export const acelidaParser: BankParser = {
   },
 };
 
-function empty(warnings: string[]): ParsedStatement {
+function empty(
+  warnings: string[],
+  currency: ParsedStatement['currency'] = null,
+): ParsedStatement {
   return {
     template: 'ACELIDA',
     bankCode: 'ACELIDA',
     accountNumber: null,
-    currency: null,
+    currency,
     periodStart: null,
     periodEnd: null,
     openingBalance: null,

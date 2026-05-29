@@ -4,6 +4,7 @@ import { Currency } from '@prisma/client';
 import { BadRequestError } from '../utils/errors';
 import { importService } from '../services/import.service';
 import { ALL_TEMPLATES, BankTemplate } from '../services/bankParsers';
+import { normalizeCurrency } from '../utils/currency';
 
 const TEMPLATE_VALUES = ALL_TEMPLATES as readonly BankTemplate[];
 
@@ -21,13 +22,13 @@ export const importController = {
     const { template } = schema.parse(req.body);
 
     const parsed = importService.parse(req.file.buffer, template);
-
+    console.log("parsed: ", parsed);  
     res.json({
       data: {
         template: parsed.template,
         bankCode: parsed.bankCode,
         accountNumber: parsed.accountNumber,
-        currency: parsed.currency,
+        currency: normalizeCurrency(parsed.currency) || parsed.currency,
         periodStart: parsed.periodStart,
         periodEnd: parsed.periodEnd,
         openingBalance: parsed.openingBalance,

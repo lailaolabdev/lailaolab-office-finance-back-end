@@ -89,4 +89,63 @@ export const nonFinancialItemService = {
     await this.getById(id);
     return prisma.nonFinancialItem.delete({ where: { id } });
   },
+
+  async getSummary(type?: NonFinancialItemType) {
+    const items = await prisma.nonFinancialItem.findMany({
+      where: type ? { type } : undefined,
+      include: {
+        bankAccount: {
+          include: {
+            bank: { select: { code: true, name: true } },
+            company: { select: { name: true } },
+          },
+        },
+      },
+    });
+
+    const byAccount: Record<
+      string,
+      {
+        bankAccountId: string;
+        accountNumber: string;
+        accountName: string;
+        bankCode: string;
+        companyName: string;
+        currency: string;
+        totalAmount: number;
+      }
+    > = {};
+
+    const grandTotal: Record<string, number> = {};
+
+    for (const item of items) {
+      const amt = Number(item.amount);
+      const curr = item.currency || item.bankAccount.currency;
+
+      // Group by account
+      if (!byAccount[item.bankAccountId]) {
+        byAccount[item.bankAccountId] = {
+          bankAccountId: item.bankAccountId,
+          accountNumber: item.bankAccount.accountNumber,
+          accountName: item.bankAccount.accountName,
+          bankCode: item.bankAccount.bank.code,
+          companyName: item.bankAccount.company.name,
+          currency: curr,
+          totalAmount: 0,
+        };
+      }
+      byAccount[item.bankAccountId].totalAmount += amt;
+
+      // Grand total by currency
+      if (!grandTotal[curr]) {
+        grandTotal[curr] = 0;
+      }
+      grandTotal[curr] += amt;
+    }
+
+    return {
+      accountsSummary: Object.values(byAccount),
+      grandTotal,
+    };
+  },
 };

@@ -8,10 +8,10 @@ async function main() {
 
   // Banks
   const banks = [
-    { code: 'BCEL', name: 'ທະນາຄານການຄ້າຕ່າງປະເທດລາວ', nameEn: 'BCELOne (BCEL)' },
+    { code: 'BCEL', name: 'ທະນາຄານການຄ້າຕ່າງປະເທດລາວ', nameEn: 'BCELOne Bank (BCEL)' },
     { code: 'JDB', name: 'ທະນາຄານຮ່ວມພັດທະນາ', nameEn: 'Joint Development Bank (JDB)' },
     { code: 'LDB', name: 'ທະນາຄານພັດທະນາລາວ', nameEn: 'Lao Development Bank (LDB)' },
-    { code: 'IB', name: 'ທະນາຄານອຸດສາຫະກຳ', nameEn: 'Industrial Bank (IB)' },
+    { code: 'IB', name: 'ທະນາຄານອິນໂດຈີນ', nameEn: 'Indochina Bank (IB)' },
     { code: 'ACELIDA', name: 'ທະນາຄານ ACELIDA', nameEn: 'ACELIDA Bank (ACELIDA)' },
   ];
 
@@ -40,29 +40,28 @@ async function main() {
 
   // Sample income categories
   const incomeCategories = [
-    { code: 'INC-002', name: 'ລາຍຣັບ', },
-    // { code: 'INC-003', name: 'ດອກເບັ້ຍ', },
-    // { code: 'INC-099', name: 'ລາຍຮັບອື່ນໆ', },
+    { code: 'INC-001', name: 'ລາຍຮັບຈາກການຂາຍ', type: 'INCOME' },
+    { code: 'INC-002', name: 'ລາຍຮັບຈາກການບໍລິການ', type: 'INCOME' },
+    { code: 'INC-003', name: 'ດອກເບັ້ຍຮັບ', type: 'INCOME' },
+    { code: 'INC-099', name: 'ລາຍຮັບອື່ນໆ', type: 'INCOME' },
   ];
 
   // Sample expense categories
   const expenseCategories = [
-
-    { code: 'EXP-001', name: 'ລາຍຈ່າຍ', },
-    // { code: 'EXP-001', name: 'ເງິນເດືອນ', },
-    // { code: 'EXP-002', name: 'ຄ່ານ້ຳ-ໄຟ', },
-    // { code: 'EXP-003', name: 'ຄ່າເຊົ່າ', },
-    // { code: 'EXP-004', name: 'ການຕະຫຼາດ', },
-    // { code: 'EXP-005', name: 'ຄ່າຂົນສົ່ງ', },
-    // { code: 'EXP-006', name: 'ອຸປະກອນສຳນັກງານ', },
-    // { code: 'EXP-099', name: 'ລາຍຈ່າຍອື່ນໆ' },
+    { code: 'EXP-001', name: 'ເງິນເດືອນ', type: 'EXPENSE' },
+    { code: 'EXP-002', name: 'ຄ່ານ້ຳ-ໄຟ', type: 'EXPENSE' },
+    { code: 'EXP-003', name: 'ຄ່າເຊົ່າ', type: 'EXPENSE' },
+    { code: 'EXP-004', name: 'ການຕະຫຼາດ', type: 'EXPENSE' },
+    { code: 'EXP-005', name: 'ຄ່າຂົນສົ່ງ', type: 'EXPENSE' },
+    { code: 'EXP-006', name: 'ອຸປະກອນສຳນັກງານ', type: 'EXPENSE' },
+    { code: 'EXP-099', name: 'ລາຍຈ່າຍອື່ນໆ', type: 'EXPENSE' },
   ];
 
   for (const cat of [...incomeCategories, ...expenseCategories]) {
     await prisma.category.upsert({
       where: { code: cat.code },
-      update: {},
-      create: cat,
+      update: { type: cat.type as any },
+      create: { ...cat, type: cat.type as any },
     });
   }
   console.log(`✅ Seeded ${incomeCategories.length + expenseCategories.length} categories`);

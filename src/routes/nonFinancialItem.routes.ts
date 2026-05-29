@@ -7,7 +7,9 @@ import { asyncHandler } from '../utils/asyncHandler';
 const router = Router();
 router.use(authenticate);
 
+router.get('/summary', asyncHandler(nonFinancialItemController.summary));
 router.get('/', asyncHandler(nonFinancialItemController.list));
+
 router.get('/:id', asyncHandler(nonFinancialItemController.get));
 router.post(
   '/',

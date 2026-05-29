@@ -5,6 +5,7 @@ import { Currency, Prisma, TransactionType } from '@prisma/client';
 import { prisma } from '../config/prisma';
 import { BadRequestError, ConflictError } from '../utils/errors';
 import { parseStatement, ParsedStatement, BankTemplate } from './bankParsers';
+import { normalizeCurrency } from '../utils/currency';
 
 interface IngestParams {
   buffer: Buffer;
@@ -122,8 +123,10 @@ export const importService = {
       );
     }
 
+    const rawCurrency = currency ?? parsed.currency;
+    const normalizedParsedCurrency = normalizeCurrency(rawCurrency);
     const useCurrency =
-      currency ?? ((parsed.currency as Currency | null) ?? (account.currency as Currency));
+      (normalizedParsedCurrency as Currency | null) ?? (account.currency as Currency);
     // For LAK → LAK we don't need a stored rate; it's trivially 1.
     const exchange =
       useCurrency === Currency.LAK

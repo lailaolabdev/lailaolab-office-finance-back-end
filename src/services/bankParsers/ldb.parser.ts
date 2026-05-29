@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import { BankParser, ParsedRow, ParsedStatement } from './types';
-import { cellStr, findRowIndex, parseAmount, parseDateCell } from './utils';
+import { Currency } from '@prisma/client';
+import { cellStr, extractCurrencyFromMetaRows, findRowIndex, parseAmount, parseDateCell } from './utils';
 
 /**
  * LDB Statement Format
@@ -94,42 +95,39 @@ export const ldbParser: BankParser = {
 
 interface LdbMeta {
   accountNumber: string | null;
-  currency: string | null;
+  currency: Currency | null;
   periodStart: Date | null;
   periodEnd: Date | null;
   openingBalance: number | null;
 }
 
 function extractLdbMeta(rows: unknown[][]): LdbMeta {
-  const meta: LdbMeta = {
-    accountNumber: null,
-    currency: null,
-    periodStart: null,
-    periodEnd: null,
-    openingBalance: null,
-  };
   const blob = rows
-    .slice(0, 4)
+    .slice(0, 8)
     .flat()
     .map((c) => cellStr(c))
     .join(' ');
 
+  let accountNumber: string | null = null;
+  let periodStart: Date | null = null;
+  let periodEnd: Date | null = null;
+  let openingBalance: number | null = null;
+
   const accMatch = blob.match(/account:\s*(\d+)/i) || blob.match(/ບັນຊີ\s*\/\s*account:\s*(\d+)/i);
-  if (accMatch) meta.accountNumber = accMatch[1];
+  if (accMatch) accountNumber = accMatch[1];
 
   const periodMatch = blob.match(/(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})/);
   if (periodMatch) {
-    meta.periodStart = parseDateCell(periodMatch[1]);
-    meta.periodEnd = parseDateCell(periodMatch[2]);
+    periodStart = parseDateCell(periodMatch[1]);
+    periodEnd = parseDateCell(periodMatch[2]);
   }
 
   const balMatch = blob.match(/From previous balance:\s*([\d,\.]+)/i);
-  if (balMatch) meta.openingBalance = parseAmount(balMatch[1]);
+  if (balMatch) openingBalance = parseAmount(balMatch[1]);
 
-  const curMatch = blob.match(/Currency\s*:\s*(\w+)/i);
-  if (curMatch) meta.currency = curMatch[1].toUpperCase();
+  const currency = extractCurrencyFromMetaRows(rows, { maxRows: 8 });
 
-  return meta;
+  return { accountNumber, currency, periodStart, periodEnd, openingBalance };
 }
 
 function empty(meta: LdbMeta, warnings: string[]): ParsedStatement {
