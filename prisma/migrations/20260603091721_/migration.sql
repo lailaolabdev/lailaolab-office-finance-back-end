@@ -2,7 +2,7 @@
 CREATE TYPE "UserRole" AS ENUM ('ADMIN', 'MANAGER', 'ACCOUNTANT_LEAD', 'FINANCE_STAFF');
 
 -- CreateEnum
-CREATE TYPE "AccountType" AS ENUM ('USABLE', 'STUCK', 'COLLATERAL', 'FUND');
+CREATE TYPE "AccountType" AS ENUM ('SAVINGS', 'CURRENT', 'FIXED_DEPOSIT');
 
 -- CreateEnum
 CREATE TYPE "Currency" AS ENUM ('LAK', 'THB', 'USD', 'CNY', 'VND');
@@ -99,7 +99,7 @@ CREATE TABLE "bank_accounts" (
     "bankId" TEXT NOT NULL,
     "accountNumber" TEXT NOT NULL,
     "accountName" TEXT NOT NULL,
-    "accountType" "AccountType" NOT NULL DEFAULT 'USABLE',
+    "accountType" "AccountType" NOT NULL DEFAULT 'SAVINGS',
     "currency" "Currency" NOT NULL DEFAULT 'LAK',
     "openingBalance" DECIMAL(20,2) NOT NULL DEFAULT 0,
     "currentBalance" DECIMAL(20,2) NOT NULL DEFAULT 0,
