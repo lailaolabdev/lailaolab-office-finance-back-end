@@ -36,4 +36,4 @@ USER node
 
 EXPOSE 4000
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss && node dist/server.js"]
