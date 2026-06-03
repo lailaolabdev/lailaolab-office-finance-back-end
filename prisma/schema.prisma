@@ -85,7 +85,7 @@ model BankAccount {
   bankId         String
   accountNumber  String
   accountName    String
-  accountType    AccountType     @default(USABLE)
+  accountType    AccountType     @default(SAVINGS)
   currency       Currency        @default(LAK)
   openingBalance Decimal         @default(0) @db.Decimal(20, 2)
   currentBalance Decimal         @default(0) @db.Decimal(20, 2)
@@ -336,10 +336,9 @@ enum UserRole {
 }
 
 enum AccountType {
-  USABLE
-  STUCK
-  COLLATERAL
-  FUND
+  SAVINGS
+  CURRENT
+  FIXED_DEPOSIT
 }
 
 enum Currency {

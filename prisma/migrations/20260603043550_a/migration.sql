@@ -301,6 +301,7 @@ CREATE TABLE "non_financial_items" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "amount" DECIMAL(20,2) NOT NULL,
     "currency" TEXT,
+    "bankAccountId" TEXT NOT NULL,
 
     CONSTRAINT "non_financial_items_pkey" PRIMARY KEY ("id")
 );
@@ -383,6 +384,9 @@ CREATE UNIQUE INDEX "exchange_rates_fromCurrency_toCurrency_effectiveAt_key" ON 
 -- CreateIndex
 CREATE INDEX "non_financial_items_type_idx" ON "non_financial_items"("type");
 
+-- CreateIndex
+CREATE INDEX "non_financial_items_bankAccountId_idx" ON "non_financial_items"("bankAccountId");
+
 -- AddForeignKey
 ALTER TABLE "activity_logs" ADD CONSTRAINT "activity_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -439,3 +443,6 @@ ALTER TABLE "attachments" ADD CONSTRAINT "attachments_transactionId_fkey" FOREIG
 
 -- AddForeignKey
 ALTER TABLE "notifications" ADD CONSTRAINT "notifications_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "non_financial_items" ADD CONSTRAINT "non_financial_items_bankAccountId_fkey" FOREIGN KEY ("bankAccountId") REFERENCES "bank_accounts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

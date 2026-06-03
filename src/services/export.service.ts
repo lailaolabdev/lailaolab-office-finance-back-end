@@ -6,6 +6,9 @@ export interface ExportFilters {
   dateFrom: Date;
   dateTo: Date;
   companyId?: string;
+  type?: 'daily' | 'daily-report' | 'stuck';
+  companyIds?: string[];
+  itemIds?: string[];
 }
 
 type Row = (string | number | null)[];
@@ -179,6 +182,11 @@ function borderAllCells(ws: XLSX.WorkSheet, dataRowStart: number) {
   }
 }
 
+// Safe Excel sheet name — strip invalid chars, cap at 31
+function safeSheetName(s: string): string {
+  return s.replace(/[:\\/?*[\]]/g, '-').slice(0, 31);
+}
+
 // Format all number cells as comma-separated with 2 decimals
 function formatAllNumbers(ws: XLSX.WorkSheet) {
   const ref = ws['!ref'];
@@ -237,12 +245,24 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 // ============================================================
 
 async function loadData(filters: ExportFilters) {
-  const { dateFrom, dateTo, companyId } = filters;
+  const { dateFrom, dateTo, companyId, companyIds } = filters;
+
+  const txnCoFilter: Prisma.TransactionWhereInput =
+    companyId ? { companyId } :
+    companyIds?.length ? { companyId: { in: companyIds } } : {};
+
+  const acctCoFilter =
+    companyId ? { companyId } :
+    companyIds?.length ? { companyId: { in: companyIds } } : {};
+
+  const coIdFilter =
+    companyId ? { id: companyId } :
+    companyIds?.length ? { id: { in: companyIds } } : {};
 
   const where: Prisma.TransactionWhereInput = {
     transactionDate: { gte: dateFrom, lte: dateTo },
     status: { in: ['POSTED', 'APPROVED'] },
-    ...(companyId ? { companyId } : {}),
+    ...txnCoFilter,
   };
 
   const [txns, accounts, companies, latestRates] = await Promise.all([
@@ -257,12 +277,12 @@ async function loadData(filters: ExportFilters) {
       orderBy: { transactionDate: 'asc' },
     }),
     prisma.bankAccount.findMany({
-      where: { isActive: true, ...(companyId ? { companyId } : {}) },
+      where: { isActive: true, ...acctCoFilter },
       include: { bank: true, company: true },
       orderBy: [{ company: { code: 'asc' } }, { bank: { code: 'asc' } }],
     }),
     prisma.company.findMany({
-      where: { isActive: true, ...(companyId ? { id: companyId } : {}) },
+      where: { isActive: true, ...coIdFilter },
       orderBy: { code: 'asc' },
     }),
     prisma.exchangeRate.findMany({
@@ -287,16 +307,44 @@ async function loadData(filters: ExportFilters) {
 
 function buildSheet1Daily(
   txns: TxnWithRels[],
+  allTxnsFromStart: { id: string; transactionDate: Date; type: TransactionType; amount: Prisma.Decimal; bankAccountId: string }[],
+  accounts: { id: string; currency: string; accountType: string; currentBalance: Prisma.Decimal }[],
   rates: Record<string, number>,
   filters: ExportFilters,
 ): { ws: XLSX.WorkSheet; name: string } {
-  const byDay = new Map<string, TxnWithRels[]>();
+  // Cap the end date to today so future dates are never shown
+  const capDate = new Date(Math.min(filters.dateTo.getTime(), Date.now()));
+  capDate.setHours(23, 59, 59, 999);
+
+  // Build every day in [dateFrom, capDate] — carry-forward even if no transactions
+  const allDays: string[] = [];
+  const cursor = new Date(filters.dateFrom);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor <= capDate) {
+    allDays.push(dayKey(new Date(cursor)));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  // Compute opening balances: start from currentBalance, then subtract
+  // every transaction that happened on or after dateFrom (rewind to opening).
+  const accountOpening = new Map<string, number>();
+  for (const a of accounts) {
+    accountOpening.set(a.id, Number(a.currentBalance));
+  }
+  for (const t of allTxnsFromStart) {
+    const signed = t.type === TransactionType.INCOME ? Number(t.amount) : -Number(t.amount);
+    accountOpening.set(t.bankAccountId, (accountOpening.get(t.bankAccountId) ?? 0) - signed);
+  }
+  // Running balances walk forward day by day from the opening value.
+  const runningBalances = new Map<string, number>(accountOpening);
+
+  // Group in-range txns by day for fast lookup
+  const txnsByDay = new Map<string, TxnWithRels[]>();
   for (const t of txns) {
     const k = dayKey(t.transactionDate);
-    if (!byDay.has(k)) byDay.set(k, []);
-    byDay.get(k)!.push(t);
+    if (!txnsByDay.has(k)) txnsByDay.set(k, []);
+    txnsByDay.get(k)!.push(t);
   }
-  const days = Array.from(byDay.keys()).sort();
 
   const rows: Row[] = [];
 
@@ -328,28 +376,47 @@ function buildSheet1Daily(
     null, null, null,
   ]);
 
-  let runningLAK = 0;
-  days.forEach((day, idx) => {
-    const list = byDay.get(day)!;
+  let prevTotalLAK = 0;
+
+  allDays.forEach((day, idx) => {
+    const list = txnsByDay.get(day) ?? [];
+
     const inc: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
     const exp: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
+
+    // Apply today's movements to running balances + collect income/expense
     for (const t of list) {
+      const signed = t.type === 'INCOME' ? num(t.amount) : -num(t.amount);
+      runningBalances.set(t.bankAccount.id, (runningBalances.get(t.bankAccount.id) ?? 0) + signed);
       if (t.currency in inc) {
         if (t.type === 'INCOME') inc[t.currency] += num(t.amount);
         else if (t.type === 'EXPENSE') exp[t.currency] += num(t.amount);
       }
     }
-    const bal = { LAK: inc.LAK - exp.LAK, THB: inc.THB - exp.THB, USD: inc.USD - exp.USD };
-    const totalLAK = bal.LAK * rates.LAK + bal.THB * rates.THB + bal.USD * rates.USD;
-    const incLAK = inc.LAK * rates.LAK + inc.THB * rates.THB + inc.USD * rates.USD;
-    const expLAK = exp.LAK * rates.LAK + exp.THB * rates.THB + exp.USD * rates.USD;
-    const checkPrev = r2(totalLAK - runningLAK);
+
+    // Aggregate running balances per currency + split usable/stuck
+    const bal: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
+    let usableLAK = 0;
+    let stuckLAK = 0;
+    for (const a of accounts) {
+      const b = runningBalances.get(a.id) ?? 0;
+      const cur = a.currency as string;
+      if (cur in bal) bal[cur] += b;
+      const rate = rates[cur] || 1;
+      if (a.accountType !== 'FIXED_DEPOSIT') usableLAK += b * rate;
+      else stuckLAK += b * rate;
+    }
+    const totalLAK = usableLAK + stuckLAK;
+
+    const incLAK = inc.LAK * (rates.LAK || 1) + inc.THB * (rates.THB || 1) + inc.USD * (rates.USD || 1);
+    const expLAK = exp.LAK * (rates.LAK || 1) + exp.THB * (rates.THB || 1) + exp.USD * (rates.USD || 1);
+    const checkPrev = idx === 0 ? 0 : r2(totalLAK - prevTotalLAK - (incLAK - expLAK));
     const checkIE = r2(incLAK - expLAK);
-    runningLAK = totalLAK;
+    prevTotalLAK = totalLAK;
 
     rows.push([
       idx + 1, fmtDate(new Date(day)),
-      r2(totalLAK), r2(totalLAK), 0,
+      r2(totalLAK), r2(usableLAK), r2(stuckLAK),
       bal.LAK || null, bal.THB || null, bal.USD || null,
       inc.LAK || null, inc.THB || null, inc.USD || null,
       exp.LAK || null, exp.THB || null, exp.USD || null,
@@ -395,7 +462,7 @@ function buildSheet1Daily(
     }
   });
 
-  if (days.length === 0) {
+  if (allDays.length === 0) {
     rows.push([1, fmtDate(filters.dateFrom), 0, 0, 0, null, null, null, null, null, null, null, null, null, rates.LAK, rates.THB, rates.USD, 0, 0, 0]);
   }
 
@@ -629,14 +696,14 @@ function buildSheet3DailyReport(
   rates: Record<string, number>,
   filters: ExportFilters,
 ): { ws: XLSX.WorkSheet; name: string } {
-  const target = filters.dateTo;
-  const dayTxns = txns.filter((t) => dayKey(t.transactionDate) === dayKey(target));
+  // Use all transactions in the date range (not just the last day)
   const CUR = ['LAK', 'THB', 'USD'] as const;
+  const dateLabel = `${fmtDate(filters.dateFrom)} - ${fmtDate(filters.dateTo)}`;
 
   const rows: Row[] = [];
 
   // ── Title block ──────────────────────────────────────────
-  rows.push(['ລາຍງານການເງີນປະຈຳວັນ', null, null, null, null, null, null, fmtDate(target)]);
+  rows.push(['ລາຍງານການເງີນປະຈຳວັນ', null, null, null, null, null, null, dateLabel]);
   rows.push([]);
 
   // ── Exchange rate block ───────────────────────────────────
@@ -646,10 +713,10 @@ function buildSheet3DailyReport(
   rows.push([null, 'USD', rates.USD]);
   rows.push([]);
 
-  // ── Grand total (all companies) ───────────────────────────
+  // ── Grand total (all companies, entire range) ─────────────
   const allInc: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
   const allExp: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
-  for (const t of dayTxns) {
+  for (const t of txns) {
     if (!(t.currency in allInc)) continue;
     if (t.type === 'INCOME') allInc[t.currency] += num(t.amount);
     else if (t.type === 'EXPENSE') allExp[t.currency] += num(t.amount);
@@ -676,7 +743,7 @@ function buildSheet3DailyReport(
 
   // ── One block per company ─────────────────────────────────
   companies.forEach((co) => {
-    const coTxns = dayTxns.filter((t) => t.company.id === co.id);
+    const coTxns = txns.filter((t) => t.company.id === co.id);
     const inc: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
     const exp: Record<string, number> = { LAK: 0, THB: 0, USD: 0 };
     for (const t of coTxns) {
@@ -743,7 +810,7 @@ function buildSheet3DailyReport(
   });
 
   // No data guard
-  if (companies.length === 0) {
+  if (companies.length === 0 || txns.length === 0) {
     rows.push(['(ບໍ່ມີຂໍ້ມູນ)']);
   }
 
@@ -767,228 +834,227 @@ function buildSheet3DailyReport(
 }
 
 // ============================================================
-// Sheet 7 — ລາຍການເງິນທີ່ໃຊ້ບໍ່ໄດ້
+// Per-company master sheet (for daily-report multi-company export)
 // ============================================================
 
-function buildSheet7Stuck(
-  accounts: { id: string; accountName: string; accountType: string; currency: string; openingBalance: Prisma.Decimal; currentBalance: Prisma.Decimal; bank: { code: string }; company: { name: string } }[],
+function buildPerCompanyMasterSheet(
+  txns: TxnWithRels[],
+  allAccounts: { id: string; accountName: string; accountType: string; currency: string; openingBalance: Prisma.Decimal; currentBalance: Prisma.Decimal; bank: { code: string; name: string }; company: { id: string; code: string; name: string } }[],
+  rates: Record<string, number>,
+  company: { id: string; code: string; name: string },
+): { ws: XLSX.WorkSheet; name: string } {
+  const coTxns = txns.filter((t) => t.company.id === company.id);
+  const coAccounts = allAccounts.filter((a) => a.company.id === company.id);
+  const acctCols = buildAccountColumns(coAccounts);
+  const { ws } = buildSheet2Master(coTxns, acctCols, rates, [company]);
+  // User-requested name: "<company> ສະຫຼຸບ ລາຍຮັບ-ລາຍຈ່າຍ".
+  // Excel caps sheet names at 31 chars — keep the company name visible and let
+  // the suffix truncate; makeUniqueNamer() guarantees uniqueness on collision.
+  const name = `${company.name} ສະຫຼຸບ ລາຍຮັບ-ລາຍຈ່າຍ`;
+  return { ws, name };
+}
+
+// ============================================================
+// NFI-item sheets (for stuck multi-item export)
+// ============================================================
+
+type NfiItemWithRelations = {
+  id: string;
+  type: string;
+  description: string;
+  amount: Prisma.Decimal;
+  currency: string | null;
+  date: Date;
+  bankAccount: {
+    id: string;
+    accountName: string;
+    accountNumber: string;
+    currency: string;
+    company: { id: string; code: string; name: string };
+    bank: { id: string; code: string; name: string };
+  };
+};
+
+async function loadNfiItems(itemIds?: string[]): Promise<NfiItemWithRelations[]> {
+  return prisma.nonFinancialItem.findMany({
+    where: itemIds && itemIds.length > 0 ? { id: { in: itemIds } } : undefined,
+    include: {
+      bankAccount: {
+        include: {
+          company: { select: { id: true, code: true, name: true } },
+          bank: { select: { id: true, code: true, name: true } },
+        },
+      },
+    },
+    orderBy: [{ type: 'asc' }, { createdAt: 'asc' }],
+  }) as Promise<NfiItemWithRelations[]>;
+}
+
+async function loadRates(dateTo: Date): Promise<Record<string, number>> {
+  const latestRates = await prisma.exchangeRate.findMany({
+    where: { toCurrency: 'LAK', effectiveAt: { lte: dateTo } },
+    orderBy: { effectiveAt: 'desc' },
+  });
+  const rates: Record<string, number> = { LAK: 1 };
+  for (const rate of latestRates) {
+    if (!rates[rate.fromCurrency]) rates[rate.fromCurrency] = Number(rate.rate);
+  }
+  if (!rates.THB) rates.THB = 660;
+  if (!rates.USD) rates.USD = 21500;
+  return rates;
+}
+
+function buildNfiItemsCombinedSheet(
+  items: NfiItemWithRelations[],
   rates: Record<string, number>,
 ): { ws: XLSX.WorkSheet; name: string } {
-  const stuck = accounts.filter(
-    (a) => a.accountType === 'STUCK' || a.accountType === 'COLLATERAL',
-  );
-
   const rows: Row[] = [];
-  rows.push(['ຊັບສິນທີ່ໃຊ້ບໍ່ໄດ້ / ຫັກໃວ້', null, null, null, null, null, null]);
+  rows.push(['ລາຍການເງິນທີ່ໃຊ້ບໍ່ໄດ້', null, null, null, null, null, null, null, null]);
   rows.push([]);
-  rows.push(['ລ/ດ', 'ລາຍລະອຽດ', 'ບໍລິສັດ', 'ທະນາຄານ', 'ສະກຸນເງິນ', 'ຈຳນວນເງິນ', 'ລວມເປັນເງິນກີບ']);
+  rows.push(['ລ/ດ', 'ລາຍລະອຽດ', 'ປະເພດ', 'ບໍລິສັດ', 'ທະນາຄານ', 'ເລກບັນຊີ', 'ສະກຸນ', 'ຈຳນວນ', 'ທຽບເທົ່າກີບ']);
   const hdrRow = 2;
-
   let total = 0;
-  stuck.forEach((a, i) => {
-    const amt = num(a.currentBalance);
-    const lak = r2(amt * (rates[a.currency] ?? 1));
+  items.forEach((item, i) => {
+    const currency = item.currency ?? item.bankAccount.currency;
+    const amt = Number(item.amount);
+    const lak = r2(amt * (rates[currency] ?? 1));
     total += lak;
-    rows.push([i + 1, a.accountName, a.company.name, a.bank.code, a.currency, amt || null, lak]);
+    rows.push([i + 1, item.description, item.type, item.bankAccount.company.name, item.bankAccount.bank.code, item.bankAccount.accountNumber, currency, amt || null, lak]);
   });
-  if (stuck.length === 0) rows.push([1, '(ບໍ່ມີຂໍ້ມູນ)', null, null, null, null, 0]);
-
+  if (items.length === 0) rows.push([1, '(ບໍ່ມີຂໍ້ມູນ)', null, null, null, null, null, null, 0]);
   rows.push([]);
-  rows.push(['ລວມເງິນທັງໝົດທີ່ຫັກໄວ້', null, null, null, null, null, r2(total)]);
+  rows.push(['ລວມ', null, null, null, null, null, null, null, r2(total)]);
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  styleRange(ws, hdrRow, 0, hdrRow, 6, HEADER_STYLE);
+  styleRange(ws, hdrRow, 0, hdrRow, 8, HEADER_STYLE);
   borderAllCells(ws, hdrRow + 1);
-  const lastRow = hdrRow + 1 + Math.max(stuck.length, 1) + 1;
-  styleRange(ws, lastRow, 0, lastRow, 6, TOTAL_STYLE);
-
-  ws['!cols'] = [
-    { wch: 5 }, { wch: 28 }, { wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 16 }, { wch: 18 },
-  ];
-
+  styleRange(ws, rows.length - 1, 0, rows.length - 1, 8, TOTAL_STYLE);
+  formatAllNumbers(ws);
+  applyDefaultFont(ws);
+  ws['!cols'] = [{ wch: 5 }, { wch: 36 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 20 }, { wch: 8 }, { wch: 14 }, { wch: 16 }];
   return { ws, name: 'ລາຍການເງິນທີ່ໃຊ້ບໍ່ໄດ້' };
 }
 
-// ============================================================
-// Sheet 8 — ກອງທຶນ ຢາມາໂມໂຕະ
-// ============================================================
-
-function buildSheet8Fund(
-  txns: TxnWithRels[],
+function buildNfiItemDetailSheet(
+  item: NfiItemWithRelations,
   rates: Record<string, number>,
 ): { ws: XLSX.WorkSheet; name: string } {
-  const fundTxns = txns.filter(
-    (t) =>
-      t.bankAccount.accountType === 'FUND' ||
-      t.bankAccount.accountName.includes('ກອງທຶນ') ||
-      t.bankAccount.accountName.toLowerCase().includes('yamamoto'),
-  );
-
-  const rows: Row[] = [];
-  rows.push(['ລາຍຮັບ-ລາຍຈ່າຍ ກອງທຶນ', null, null, null, null, null, null]);
-  rows.push(['ອັດຕາແລກປ່ຽນ', 'LAK', rates.LAK, 'THB', rates.THB, 'USD', rates.USD]);
-  rows.push([]);
-  rows.push(['ລ/ດ', 'ວ/ດ/ປ', 'ເນື້ອໃນ', 'ສະກຸນເງິນ', 'ຈຳນວນເງິນ', 'ລວມເປັນກີບ', 'ປະເພດ']);
-  const hdrRow = 3;
-
-  let running = 0;
-  fundTxns.forEach((t, i) => {
-    const amt = num(t.amount);
-    const sign = t.type === 'INCOME' ? 1 : -1;
-    const lak = r2(amt * (rates[t.currency] ?? 1) * sign);
-    running += lak;
-    rows.push([
-      i + 1, fmtDate(t.transactionDate), t.description,
-      t.currency, amt, lak,
-      t.type === 'INCOME' ? 'ຮັບ' : 'ຈ່າຍ',
-    ]);
-  });
-  if (fundTxns.length === 0) rows.push([null, null, '(ບໍ່ມີຂໍ້ມູນ)', null, null, 0, null]);
-
-  rows.push([]);
-  rows.push(['ຍອດເຫຼືອລວມ', null, null, null, null, r2(running), null]);
-
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  styleRange(ws, hdrRow, 0, hdrRow, 6, HEADER_STYLE);
-  borderAllCells(ws, hdrRow + 1);
-  const lastRow = hdrRow + 1 + Math.max(fundTxns.length, 1) + 1;
-  styleRange(ws, lastRow, 0, lastRow, 6, TOTAL_STYLE);
-
-  ws['!cols'] = [
-    { wch: 5 }, { wch: 13 }, { wch: 36 }, { wch: 10 }, { wch: 14 }, { wch: 16 }, { wch: 10 },
+  const currency = item.currency ?? item.bankAccount.currency;
+  const amt = Number(item.amount);
+  const lak = r2(amt * (rates[currency] ?? 1));
+  const rows: Row[] = [
+    ['ລາຍລະອຽດ', 'ຂໍ້ມູນ'],
+    ['ຄຳອະທິບາຍ', item.description],
+    ['ປະເພດ', item.type],
+    ['ວັນທີ', fmtDate(item.date)],
+    ['ບໍລິສັດ', item.bankAccount.company.name],
+    ['ທະນາຄານ', item.bankAccount.bank.code],
+    ['ຊື່ບັນຊີ', item.bankAccount.accountName],
+    ['ເລກບັນຊີ', item.bankAccount.accountNumber],
+    ['ສະກຸນ', currency],
+    ['ຈຳນວນ', amt],
+    ['ທຽບເທົ່າກີບ', lak],
   ];
-
-  return { ws, name: 'ກອງທຶນ ຢາມາໂມໂຕະ' };
-}
-
-// ============================================================
-// Sheet 10 — ODSc ຫັກໃວ້ໃຫ້ກະຊວງ 5%
-// ============================================================
-
-function buildSheet10Ministry(
-  txns: TxnWithRels[],
-  accounts: { id: string; accountName: string; accountType: string; openingBalance: Prisma.Decimal; bank: { code: string } }[],
-): { ws: XLSX.WorkSheet; name: string } {
-  const target = accounts.find(
-    (a) =>
-      a.accountName.includes('ກະຊວງ') ||
-      a.accountName.includes('5%') ||
-      a.accountName.toLowerCase().includes('odsc'),
-  );
-
-  const rows: Row[] = [];
-  rows.push([target ? target.bank.code : 'BCEL', null, null, target?.accountName ?? 'ODSc 5%', null, null, null]);
-
-  const acctTxns = target ? txns.filter((t) => t.bankAccount.id === target.id) : [];
-  const opening = target ? num(target.openingBalance) : 0;
-  const totalOut = acctTxns.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + num(t.amount), 0);
-
-  rows.push([null, null, null, 'ຍອດຍົກມາ', r2(opening), 'ລ່າຍຈ່າຍ', r2(totalOut), 'ຍອດເຫຼືອ', r2(opening - totalOut)]);
-  rows.push(['ລ/ດ', 'ວັນທີ່', 'ລາຍລະອຽດ', 'ຍອດຍົກມາ', 'ລ່າຍຈ່າຍ', 'ຍອດເຫຼືອ', 'ໝາຍເຫດ']);
-  const hdrRow = 2;
-  rows.push([null, null, 'ຍອດເປີດ', r2(opening), null, r2(opening), null]);
-
-  let bal = opening;
-  acctTxns.forEach((t, i) => {
-    const out = t.type === 'EXPENSE' ? num(t.amount) : 0;
-    bal -= out;
-    rows.push([i + 1, fmtDate(t.transactionDate), t.description, null, out || null, r2(bal), t.note ?? '']);
-  });
-  if (acctTxns.length === 0) rows.push([null, null, '(ບໍ່ມີຂໍ້ມູນ)', null, null, r2(opening), null]);
-
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  styleRange(ws, hdrRow, 0, hdrRow, 6, HEADER_STYLE);
-  borderAllCells(ws, hdrRow + 1);
-
-  ws['!cols'] = [
-    { wch: 5 }, { wch: 13 }, { wch: 36 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 24 },
-  ];
-
-  return { ws, name: 'ODSc ຫັກໃວ້ໃຫ້ກະຊວງ 5%' };
-}
-
-// ============================================================
-// Sheet 11 — LLL - ໜີ້ຕ້ອງສົ່ງ ພາຈ່າຍ
-// ============================================================
-
-function buildSheet11Debts(txns: TxnWithRels[]): { ws: XLSX.WorkSheet; name: string } {
-  const debt = txns.filter(
-    (t) =>
-      (t.category?.name?.includes('ໜີ້') ?? false) ||
-      (t.category?.name?.includes('ພາຈ່າຍ') ?? false) ||
-      (t.note?.includes('ໜີ້') ?? false) ||
-      (t.note?.includes('ພາຈ່າຍ') ?? false),
-  );
-
-  const lakSide = debt.filter((t) => t.currency === 'LAK');
-  const usdSide = debt.filter((t) => t.currency === 'USD');
-
-  const rows: Row[] = [];
-  rows.push(['BCEL — LAK', null, null, null, null, null, null, null, 'JDB — USD', null, null, null, null, null]);
-
-  const lakSum = lakSide.reduce((s, t) => s + num(t.amount), 0);
-  const usdSum = usdSide.reduce((s, t) => s + num(t.amount), 0);
-  rows.push([null, null, r2(lakSum), 0, r2(lakSum), null, null, null, null, null, r2(usdSum), 0, r2(usdSum), null]);
-
-  rows.push([
-    'ລ/ດ', 'ວັນທີ່', 'ຈຳນວນເງິນ', 'ສົ່ງແລ້ວ', 'ຍອດເຫຼືອ', 'ໝາຍເຫດ', null, null,
-    'ລ/ດ', 'ວັນທີ່', 'ຈຳນວນເງິນ', 'ສົ່ງແລ້ວ', 'ຍອດເຫຼືອ', 'ໝາຍເຫດ',
-  ]);
-  const hdrRow = 2;
-
-  const maxRows = Math.max(lakSide.length, usdSide.length, 1);
-  let lakBal = 0, usdBal = 0;
-  for (let i = 0; i < maxRows; i++) {
-    const l = lakSide[i];
-    const u = usdSide[i];
-    if (l) lakBal += num(l.amount);
-    if (u) usdBal += num(u.amount);
-    rows.push([
-      l ? i + 1 : null, l ? fmtDate(l.transactionDate) : null, l ? num(l.amount) : null,
-      null, l ? r2(lakBal) : null, l?.description ?? null, null, null,
-      u ? i + 1 : null, u ? fmtDate(u.transactionDate) : null, u ? num(u.amount) : null,
-      null, u ? r2(usdBal) : null, u?.description ?? null,
-    ]);
-  }
-
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  styleRange(ws, hdrRow, 0, hdrRow, 13, HEADER_STYLE);
-  borderAllCells(ws, hdrRow + 1);
-
-  ws['!cols'] = [
-    { wch: 5 }, { wch: 13 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 2 }, { wch: 2 },
-    { wch: 5 }, { wch: 13 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 24 },
-  ];
-
-  return { ws, name: 'LLL - ໜີ້ຕ້ອງສົ່ງ ພາຈ່າຍ' };
+  styleRange(ws, 0, 0, 0, 1, HEADER_STYLE);
+  borderAllCells(ws, 1);
+  styleRange(ws, rows.length - 1, 0, rows.length - 1, 1, TOTAL_STYLE);
+  formatAllNumbers(ws);
+  applyDefaultFont(ws);
+  ws['!cols'] = [{ wch: 20 }, { wch: 40 }];
+  return { ws, name: safeSheetName(item.description) };
 }
 
 // ============================================================
 // Public entry
 // ============================================================
 
+// Ensure every sheet name is unique and within Excel's 31-char limit.
+function makeUniqueNamer() {
+  const used = new Set<string>();
+  return (raw: string): string => {
+    const base = safeSheetName(raw);
+    let name = base;
+    let i = 2;
+    while (used.has(name)) {
+      const suffix = ` (${i})`;
+      name = base.slice(0, 31 - suffix.length) + suffix;
+      i++;
+    }
+    used.add(name);
+    return name;
+  };
+}
+
+function appendSheet(
+  wb: XLSX.WorkBook,
+  s: { ws: XLSX.WorkSheet; name: string },
+  namer: (raw: string) => string,
+) {
+  formatAllNumbers(s.ws);
+  applyDefaultFont(s.ws);
+  XLSX.utils.book_append_sheet(wb, s.ws, namer(s.name));
+}
+
+// type = 'daily' → only the daily-summary sheet (ສະຫຼຸບປະຈໍາວັນ)
+async function buildDailyWorkbook(filters: ExportFilters): Promise<Buffer> {
+  const { txns, accounts, rates } = await loadData(filters);
+
+  // Fetch ALL transactions from dateFrom onwards (no upper bound) so we can
+  // rewind currentBalance back to the opening balance at the start of the range.
+  const allTxnsFromStart = await prisma.transaction.findMany({
+    where: {
+      status: { in: ['POSTED', 'APPROVED'] },
+      bankAccountId: { in: accounts.map((a) => a.id) },
+      transactionDate: { gte: filters.dateFrom },
+    },
+    select: {
+      id: true,
+      transactionDate: true,
+      type: true,
+      amount: true,
+      bankAccountId: true,
+    },
+  });
+
+  const wb = XLSX.utils.book_new();
+  const namer = makeUniqueNamer();
+  appendSheet(wb, buildSheet1Daily(txns, allTxnsFromStart, accounts, rates, filters), namer);
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
+// type = 'daily-report' → combined report sheet + one master sheet per company
+async function buildDailyReportWorkbook(filters: ExportFilters): Promise<Buffer> {
+  const { txns, accounts, companies, rates } = await loadData(filters);
+  const wb = XLSX.utils.book_new();
+  const namer = makeUniqueNamer();
+  appendSheet(wb, buildSheet3DailyReport(txns, companies, rates, filters), namer);
+  for (const co of companies) {
+    appendSheet(wb, buildPerCompanyMasterSheet(txns, accounts, rates, co), namer);
+  }
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
+// type = 'stuck' → combined list sheet + one detail sheet per NFI item
+async function buildStuckWorkbook(filters: ExportFilters): Promise<Buffer> {
+  const [items, rates] = await Promise.all([
+    loadNfiItems(filters.itemIds),
+    loadRates(filters.dateTo),
+  ]);
+  const wb = XLSX.utils.book_new();
+  const namer = makeUniqueNamer();
+  appendSheet(wb, buildNfiItemsCombinedSheet(items, rates), namer);
+  for (const item of items) {
+    appendSheet(wb, buildNfiItemDetailSheet(item, rates), namer);
+  }
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
 export const exportService = {
   async buildWorkbook(filters: ExportFilters): Promise<Buffer> {
-    const { txns, accounts, companies, rates } = await loadData(filters);
-    const acctCols = buildAccountColumns(accounts);
-
-    const wb = XLSX.utils.book_new();
-    const sheets = [
-      buildSheet1Daily(txns, rates, filters),
-      buildSheet2Master(txns, acctCols, rates, companies),
-      buildSheet3DailyReport(txns, companies, rates, filters),
-      buildSheet7Stuck(accounts, rates),
-      buildSheet8Fund(txns, rates),
-      buildSheet10Ministry(txns, accounts),
-      buildSheet11Debts(txns),
-    ];
-
-    for (const s of sheets) {
-      formatAllNumbers(s.ws);
-      applyDefaultFont(s.ws);
-      XLSX.utils.book_append_sheet(wb, s.ws, s.name.slice(0, 31));
-    }
-
-    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    if (filters.type === 'daily-report') return buildDailyReportWorkbook(filters);
+    if (filters.type === 'stuck') return buildStuckWorkbook(filters);
+    // default + 'daily' → daily-summary only
+    return buildDailyWorkbook(filters);
   },
 };

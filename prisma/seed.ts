@@ -142,7 +142,7 @@ async function main() {
         bankId: bcel.id,
         accountNumber: '010110001954452001',
         accountName: 'LAILAOLAB ICT SOLUTIONS',
-        accountType: AccountType.USABLE,
+        accountType: AccountType.SAVINGS,
         currency: Currency.LAK,
       },
       {
@@ -150,7 +150,7 @@ async function main() {
         bankId: jdb.id,
         accountNumber: '0980120000000006170001',
         accountName: 'LAILAOLAB ICT SOLUTIONS',
-        accountType: AccountType.USABLE,
+        accountType: AccountType.SAVINGS,
         currency: Currency.LAK,
       },
       {
@@ -158,7 +158,7 @@ async function main() {
         bankId: ib.id,
         accountNumber: '0100001633295',
         accountName: 'LAILAOLAB ICT SOLUTIONS',
-        accountType: AccountType.USABLE,
+        accountType: AccountType.SAVINGS,
         currency: Currency.LAK,
       },
       {
@@ -166,7 +166,7 @@ async function main() {
         bankId: ldb.id,
         accountNumber: '0302000010006190',
         accountName: 'PHAPAY CO., LTD',
-        accountType: AccountType.USABLE,
+        accountType: AccountType.SAVINGS,
         currency: Currency.LAK,
       },
     ];

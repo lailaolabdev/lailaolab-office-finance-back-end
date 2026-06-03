@@ -153,7 +153,7 @@ export const notificationService = {
     const threshold = Number(thresholdSetting?.value ?? 1_000_000);
 
     const accounts = await prisma.bankAccount.findMany({
-      where: { isActive: true, accountType: 'USABLE' },
+      where: { isActive: true, accountType: { in: ['SAVINGS', 'CURRENT'] } },
       include: { company: true, bank: true },
     });
 

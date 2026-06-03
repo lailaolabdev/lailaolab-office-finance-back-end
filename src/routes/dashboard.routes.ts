@@ -68,7 +68,7 @@ router.get(
         },
       }),
       prisma.bankAccount.aggregate({
-        where: { isActive: true, accountType: 'USABLE' },
+        where: { isActive: true, accountType: { in: ['SAVINGS', 'CURRENT'] } },
         _sum: { currentBalance: true },
       }),
       prisma.transaction.aggregate({
@@ -95,7 +95,7 @@ router.get(
       }),
       prisma.bankAccount.groupBy({
         by: ['companyId'],
-        where: { isActive: true, accountType: 'USABLE', ...(query.companyId ? { companyId: query.companyId } : {}) },
+        where: { isActive: true, accountType: { in: ['SAVINGS', 'CURRENT'] }, ...(query.companyId ? { companyId: query.companyId } : {}) },
         _sum: { currentBalance: true },
       }),
     ]);
@@ -496,7 +496,7 @@ router.get(
         balancesByCurrency[a.currency] = (balancesByCurrency[a.currency] ?? 0) + bal;
         const rate = lastRates[a.currency] || 1;
         const equiv = bal * rate;
-        if (a.accountType === 'USABLE') usableLAKEquiv += equiv;
+        if (a.accountType !== 'FIXED_DEPOSIT') usableLAKEquiv += equiv;
         else stuckLAKEquiv += equiv;
       }
       const totalEquivLAK = usableLAKEquiv + stuckLAKEquiv;
@@ -590,6 +590,13 @@ router.get(
     fromDate.setHours(0, 0, 0, 0);
     toDate.setHours(23, 59, 59, 999);
 
+    // Never show future days — cap toDate to end of today
+    const endOfToday = new Date(now);
+    endOfToday.setHours(23, 59, 59, 999);
+    if (toDate > endOfToday) {
+      toDate.setTime(endOfToday.getTime());
+    }
+
     const round2 = (n: number) =>
       Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -612,32 +619,32 @@ router.get(
         currency: true,
         accountType: true,
         companyId: true,
+        currentBalance: true,
       },
     });
 
     // =====================================================
-    // 2. TRANSACTIONS IN RANGE ONLY
+    // 2. ALL TRANSACTIONS FROM fromDate ONWARDS
+    //    (no upper bound — needed to rewind currentBalance
+    //     back to the opening balance at fromDate)
     // =====================================================
 
-    const txnWhere: Prisma.TransactionWhereInput = {
-      status: {
-        notIn: [
-          TransactionStatus.VOIDED,
-          TransactionStatus.REJECTED,
-          TransactionStatus.DRAFT,
-        ],
+    const allTxnsFromStart = await prisma.transaction.findMany({
+      where: {
+        status: {
+          notIn: [
+            TransactionStatus.VOIDED,
+            TransactionStatus.REJECTED,
+            TransactionStatus.DRAFT,
+          ],
+        },
+        bankAccountId: {
+          in: accounts.map((a) => a.id),
+        },
+        transactionDate: {
+          gte: fromDate,
+        },
       },
-      bankAccountId: {
-        in: accounts.map((a) => a.id),
-      },
-      transactionDate: {
-        gte: fromDate,
-        lte: toDate,
-      },
-    };
-
-    const txns = await prisma.transaction.findMany({
-      where: txnWhere,
       select: {
         id: true,
         transactionDate: true,
@@ -654,6 +661,11 @@ router.get(
         transactionDate: 'asc',
       },
     });
+
+    // Only in-range transactions are used for movements / company breakdown
+    const txns = allTxnsFromStart.filter(
+      (t) => new Date(t.transactionDate) <= toDate,
+    );
 
     // =====================================================
     // 3. DATE HELPER
@@ -711,7 +723,50 @@ router.get(
     }
 
     // =====================================================
-    // 6. BUILD DAILY ROWS
+    // 6. OPENING BALANCES (rewind currentBalance to start of range)
+    //    openingBalance[acct] = currentBalance
+    //                           - sum(all txns from fromDate onwards, signed)
+    // =====================================================
+
+    const accountOpening = new Map<string, number>();
+    for (const a of accounts) {
+      accountOpening.set(a.id, Number(a.currentBalance));
+    }
+    for (const t of allTxnsFromStart) {
+      const signed =
+        t.type === TransactionType.INCOME
+          ? Number(t.amount)
+          : -Number(t.amount);
+      const cur = accountOpening.get(t.bankAccountId) ?? 0;
+      accountOpening.set(t.bankAccountId, cur - signed);
+    }
+
+    // Running balance starts from the opening value and walks forward day by day.
+    const runningBalances = new Map<string, number>(accountOpening);
+
+    // =====================================================
+    // 6b. NON-FINANCIAL ITEMS (withheld / unusable)
+    //     Static totals shown on every row as informational columns.
+    // =====================================================
+
+    const nfiItems = await prisma.nonFinancialItem.findMany({
+      where: { bankAccountId: { in: accounts.map((a) => a.id) } },
+      select: { type: true, amount: true, currency: true },
+    });
+
+    let withheldLAKTotal = 0;
+    let unusableLAKTotal = 0;
+    for (const item of nfiItems) {
+      const rate = lastRates[item.currency ?? 'LAK'] || 1;
+      const amtLAK = Number(item.amount) * rate;
+      if (item.type === 'WITHHELD') withheldLAKTotal += amtLAK;
+      else if (item.type === 'UNUSABLE') unusableLAKTotal += amtLAK;
+    }
+    const withheldLAKRounded = round2(withheldLAKTotal);
+    const unusableLAKRounded = round2(unusableLAKTotal);
+
+    // =====================================================
+    // 7. BUILD DAILY ROWS
     // =====================================================
 
     type CompanyDayCell = {
@@ -719,27 +774,25 @@ router.get(
       expenseLAK: number;
       netLAK: number;
       txnCount: number;
+      usableLAK: number;
+      stuckLAK: number;
+      balances: Record<string, number>;
     };
 
     const rows: {
       date: string;
-
       totalEquivLAK: number;
-
       usableLAK: number;
-
       stuckLAK: number;
-
+      withheldLAK: number;
+      unusableLAK: number;
       balances: Record<string, number>;
-
       income: Record<string, number>;
-
       expense: Record<string, number>;
-
       rates: Record<string, number>;
-
+      checkVsPrev: number;
       checkIncomeExpense: number;
-
+      fxDiff: number;
       companies: Record<string, CompanyDayCell>;
     }[] = [];
 
@@ -747,81 +800,67 @@ router.get(
     const companyMeta = new Map<string, { companyId: string | null; code: string; name: string }>();
     const noCompanyKey = '__none__';
 
-    for (const d of days) {
+    // Group in-range txns by day key for O(days) lookup instead of O(days×txns)
+    const txnsByDay = new Map<string, typeof txns>();
+    for (const t of txns) {
+      const k = dayKey(new Date(t.transactionDate));
+      if (!txnsByDay.has(k)) txnsByDay.set(k, []);
+      txnsByDay.get(k)!.push(t);
+    }
+
+    let prevTotalEquivLAK = 0;
+
+    for (let i = 0; i < days.length; i++) {
+      const d = days[i];
+
       // ---------------------------------------------
-      // FILTER TXNS OF THIS DAY ONLY
+      // TXNS OF THIS DAY ONLY
       // ---------------------------------------------
 
-      const dayTxns = txns.filter(
-        (t) => dayKey(new Date(t.transactionDate)) === d,
-      );
+      const dayTxns = txnsByDay.get(d) ?? [];
 
       // ---------------------------------------------
-      // DAILY MOVEMENT
+      // STEP 1: Update exchange rates from today's txns
+      // ---------------------------------------------
+
+      for (const t of dayTxns) {
+        if (t.currency !== 'LAK' && Number(t.exchangeRate) > 0) {
+          lastRates[t.currency] = Number(t.exchangeRate);
+        }
+      }
+
+      // ---------------------------------------------
+      // STEP 2: Update runningBalances + collect
+      //         daily income/expense/company data
       // ---------------------------------------------
 
       const income: Record<string, number> = {};
-
       const expense: Record<string, number> = {};
-
-      const balances: Record<string, number> = {};
-
-      let usableLAK = 0;
-
-      let stuckLAK = 0;
-
       const companies: Record<string, CompanyDayCell> = {};
+      let todaysNetLAK = 0;
 
       for (const t of dayTxns) {
         const amount = Number(t.amount);
         const currency = t.currency;
-
-        // Update rate from transaction (store transaction-specific rate)
-        // This ensures we use the rate that was used when the transaction was created
-        if (
-          currency !== 'LAK' &&
-          Number(t.exchangeRate) > 0
-        ) {
-          lastRates[currency] = Number(t.exchangeRate);
-        }
-
         const rate = lastRates[currency] || 1;
+        const signed = t.type === TransactionType.INCOME ? amount : -amount;
 
-        // signed amount
-        const signed =
-          t.type === TransactionType.INCOME
-            ? amount
-            : -amount;
-
-        // balances per currency
-        balances[currency] =
-          (balances[currency] ?? 0) + signed;
-
-        // income / expense
-        if (t.type === TransactionType.INCOME) {
-          income[currency] =
-            (income[currency] ?? 0) + amount;
-        }
-
-        if (t.type === TransactionType.EXPENSE) {
-          expense[currency] =
-            (expense[currency] ?? 0) + amount;
-        }
-
-        // account type
-        const account = accounts.find(
-          (a) => a.id === t.bankAccountId,
+        // Update running balance for this account
+        runningBalances.set(
+          t.bankAccountId,
+          (runningBalances.get(t.bankAccountId) ?? 0) + signed,
         );
 
-        const equivLAK = signed * rate;
-
-        if (account?.accountType === 'USABLE') {
-          usableLAK += equivLAK;
-        } else {
-          stuckLAK += equivLAK;
+        // income / expense columns
+        if (t.type === TransactionType.INCOME) {
+          income[currency] = (income[currency] ?? 0) + amount;
+          todaysNetLAK += amount * rate;
+        } else if (t.type === TransactionType.EXPENSE) {
+          expense[currency] = (expense[currency] ?? 0) + amount;
+          todaysNetLAK -= amount * rate;
         }
 
-        // per-company per-day (LAK-equivalent)
+        // per-company per-day breakdown
         const coKey = t.company?.id ?? noCompanyKey;
         if (!companyMeta.has(coKey)) {
           companyMeta.set(coKey, {
@@ -830,12 +869,7 @@ router.get(
             name: t.company?.name ?? 'ບໍ່ໄດ້ກຳນົດບໍລິສັດ',
           });
         }
-        const coCell = companies[coKey] ?? {
-          incomeLAK: 0,
-          expenseLAK: 0,
-          netLAK: 0,
-          txnCount: 0,
-        };
+        const coCell = companies[coKey] ?? { incomeLAK: 0, expenseLAK: 0, netLAK: 0, txnCount: 0, usableLAK: 0, stuckLAK: 0, balances: {} };
         const amountLAK = amount * rate;
         if (t.type === TransactionType.INCOME) {
           coCell.incomeLAK += amountLAK;
@@ -848,47 +882,69 @@ router.get(
         companies[coKey] = coCell;
       }
 
-      // Round per-company cells for display.
+      // ---------------------------------------------
+      // STEP 3: Aggregate runningBalances per currency
+      //         → this is the CLOSING balance for the day
+      // ---------------------------------------------
+
+      const balances: Record<string, number> = {};
+      let usableLAK = 0;
+      let stuckLAK = 0;
+
+      // Per-company balance aggregation
+      const companyBals: Record<string, { usableLAK: number; stuckLAK: number; balances: Record<string, number> }> = {};
+
+      for (const a of accounts) {
+        const bal = runningBalances.get(a.id) ?? 0;
+        balances[a.currency] = (balances[a.currency] ?? 0) + bal;
+        const rate = lastRates[a.currency] || 1;
+        const equiv = bal * rate;
+        if (a.accountType !== 'FIXED_DEPOSIT') {
+          usableLAK += equiv;
+        } else {
+          stuckLAK += equiv;
+        }
+
+        // Accumulate per-company
+        const coKey = a.companyId ?? noCompanyKey;
+        if (!companyBals[coKey]) companyBals[coKey] = { usableLAK: 0, stuckLAK: 0, balances: {} };
+        companyBals[coKey].balances[a.currency] = (companyBals[coKey].balances[a.currency] ?? 0) + bal;
+        if (a.accountType !== 'FIXED_DEPOSIT') companyBals[coKey].usableLAK += equiv;
+        else companyBals[coKey].stuckLAK += equiv;
+      }
+
+      // Merge company balance data into company cells
       for (const k of Object.keys(companies)) {
         const c = companies[k];
+        const cb = companyBals[k] ?? { usableLAK: 0, stuckLAK: 0, balances: {} };
         companies[k] = {
           incomeLAK: round2(c.incomeLAK),
           expenseLAK: round2(c.expenseLAK),
           netLAK: round2(c.netLAK),
           txnCount: c.txnCount,
+          usableLAK: round2(cb.usableLAK),
+          stuckLAK: round2(cb.stuckLAK),
+          balances: cb.balances,
         };
       }
 
-      // ---------------------------------------------
-      // TOTAL
-      // ---------------------------------------------
-
-      const totalEquivLAK =
-        usableLAK + stuckLAK;
+      const totalEquivLAK = usableLAK + stuckLAK;
 
       // ---------------------------------------------
-      // CHECK
+      // STEP 4: Cross-check fields
       // ---------------------------------------------
 
-      let incomeLAK = 0;
+      const checkIncomeExpense = round2(todaysNetLAK);
 
-      let expenseLAK = 0;
+      // checkVsPrev: difference between today's total and (prev + today's movements).
+      // Non-zero means FX rate change affected the LAK equivalent of existing balances.
+      const checkVsPrev = i === 0
+        ? 0
+        : round2(totalEquivLAK - prevTotalEquivLAK - todaysNetLAK);
 
-      for (const [c, v] of Object.entries(
-        income,
-      )) {
-        incomeLAK += v * (lastRates[c] || 1);
-      }
-
-      for (const [c, v] of Object.entries(
-        expense,
-      )) {
-        expenseLAK += v * (lastRates[c] || 1);
-      }
-
-      const checkIncomeExpense = round2(
-        incomeLAK - expenseLAK,
-      );
+      const fxDiff = i === 0
+        ? 0
+        : round2(totalEquivLAK - prevTotalEquivLAK - todaysNetLAK);
 
       // ---------------------------------------------
       // PUSH
@@ -896,27 +952,22 @@ router.get(
 
       rows.push({
         date: d,
-
-        totalEquivLAK: round2(
-          totalEquivLAK,
-        ),
-
+        totalEquivLAK: round2(totalEquivLAK),
         usableLAK: round2(usableLAK),
-
         stuckLAK: round2(stuckLAK),
-
+        withheldLAK: withheldLAKRounded,
+        unusableLAK: unusableLAKRounded,
         balances,
-
         income,
-
         expense,
-
         rates: { ...lastRates },
-
+        checkVsPrev,
         checkIncomeExpense,
-
+        fxDiff,
         companies,
       });
+
+      prevTotalEquivLAK = totalEquivLAK;
     }
 
     // =====================================================
@@ -1395,7 +1446,7 @@ router.get(
       prisma.bankAccount.findMany({
         where: {
           isActive: true,
-          accountType: { in: ['STUCK', 'COLLATERAL'] },
+          accountType: 'FIXED_DEPOSIT',
           ...(query.companyId ? { companyId: query.companyId } : {}),
         },
         include: { bank: true, company: true },
@@ -1449,7 +1500,7 @@ router.get(
         where: {
           isActive: true,
           OR: [
-            { accountType: 'FUND' },
+            { accountType: 'FIXED_DEPOSIT' },
             { accountName: { contains: 'ກອງທຶນ' } },
             { accountName: { contains: 'yamamoto', mode: 'insensitive' } },
           ],
